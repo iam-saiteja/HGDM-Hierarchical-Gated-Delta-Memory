@@ -251,8 +251,8 @@ class FusedNitroEngine(torch.autograd.Function):
         q_s = q.transpose(1, 2).contiguous()
         k_s = k.transpose(1, 2).contiguous()
         v_s = v.transpose(1, 2).contiguous()
-        a_s = alpha.squeeze(-1).squeeze(-1).transpose(1, 2).contiguous()
-        b_s = beta.squeeze(-1).squeeze(-1).transpose(1, 2).contiguous()
+        a_s = alpha.transpose(1, 2).contiguous()
+        b_s = beta.transpose(1, 2).contiguous()
 
         num_chunks = math.ceil(T / 32)
         out = torch.empty_like(v_s)
@@ -309,8 +309,8 @@ class FusedNitroEngine(torch.autograd.Function):
         )
 
         return (dq.transpose(1,2), dk.transpose(1,2), dv.transpose(1,2),
-                da.unsqueeze(-1).unsqueeze(-1).transpose(1,2),
-                db.unsqueeze(-1).unsqueeze(-1).transpose(1,2),
+                da.transpose(1,2),
+                db.transpose(1,2),
                 None, # dstate
                 None) # dchunk_size
 
