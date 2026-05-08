@@ -37,6 +37,12 @@ Each script imports the pristine `HGDMUltimate` architecture from the root direc
 *   Loads the trained Enwik8 checkpoint, computes zero-shot BPB, and fine-tunes for 500 steps.
 *   Proves the architecture adapts to radically different domains with minimal compute.
 
+### 7. `exp7_multimodal_bytes.py`
+**Goal**: The Ultimate Multimodal / Universal Sequence Engine Proof.
+*   Generates raw synthetic `.wav` (Audio), `.bmp` (Image), and Raw Frame (Video) binary files.
+*   Initializes a completely blank HGDM model for each modality and trains directly on the raw 0-255 bytes.
+*   Proves that the gating mechanism naturally learns to compress and predict the binary structures (headers, pixels, waveforms) of *any* modality without specialized tokenizers.
+
 ---
 
 ## How to Run
