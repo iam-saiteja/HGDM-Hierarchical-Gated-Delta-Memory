@@ -7,91 +7,73 @@ import torch
 import torch.nn.functional as F
 import time
 import json
-from utils import BaselineTransformer
 from hgdm_ultimate import HGDMUltimate, HGDMConfig
+from utils import BaselineTransformer
 
-def run_throughput_test(model, name, seq_lens):
+def measure_throughput():
     device = torch.device('cuda')
-    model.to(device)
-    model.train()
-    
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    scaler = torch.amp.GradScaler('cuda')
-    
-    results = {}
-    print(f"\n--- Testing Throughput for {name} ---")
-    
-    for seq_len in seq_lens:
-        print(f"Testing seq_len={seq_len}...", end=" ", flush=True)
-        try:
-            x = torch.randint(0, 256, (1, seq_len)).to(device)
-            y = torch.randint(0, 256, (1, seq_len)).to(device)
-            
-            # Warmup
-            for _ in range(10):
-                optimizer.zero_grad(set_to_none=True)
-                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                    out = model(x)
-                    if isinstance(out, tuple): out = out[0]
-                    loss = F.cross_entropy(out.view(-1, 256), y.view(-1))
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-                
-            torch.cuda.synchronize()
-            t0 = time.time()
-            
-            iters = 50
-            for _ in range(iters):
-                optimizer.zero_grad(set_to_none=True)
-                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                    out = model(x)
-                    if isinstance(out, tuple): out = out[0]
-                    loss = F.cross_entropy(out.view(-1, 256), y.view(-1))
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-                
-            torch.cuda.synchronize()
-            t1 = time.time()
-            
-            total_time = t1 - t0
-            tokens_per_sec = (iters * seq_len) / total_time
-            results[str(seq_len)] = tokens_per_sec
-            print(f"{tokens_per_sec:.0f} tokens/s")
-            
-        except RuntimeError as e:
-            if "out of memory" in str(e).lower():
-                print("FAILED (OOM)")
-                results[str(seq_len)] = "OOM"
-                torch.cuda.empty_cache()
-                if name == "Transformer":
-                    break
-            else:
-                raise e
-                
-    return results
-
-if __name__ == "__main__":
-    seq_lens = [512, 1024, 2048, 4096, 8192]
+    lengths = [512, 1024, 2048, 4096, 8192]
     
     config = HGDMConfig(d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256)
-    hgdm = HGDMUltimate(config)
-    transformer = BaselineTransformer(d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256, max_seq_len=16500)
+    hgdm = HGDMUltimate(config).to(device)
     
-    tf_speed = run_throughput_test(transformer, "Transformer (with FlashAttention)", seq_lens)
+    # We use FlashAttention=True for Transformer to show its best-case scenario
+    transformer = BaselineTransformer(d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256, use_flash=True).to(device)
     
-    del transformer
-    torch.cuda.empty_cache()
+    hg_speed = []
+    tf_speed = []
+    hg_vram = []
+    tf_vram = []
     
-    hg_speed = run_throughput_test(hgdm, "HGDM (Fused Triton Kernel)", seq_lens)
+    print(f"\n--- Measuring Throughput (Tokens/Sec) ---")
     
+    for L in lengths:
+        x = torch.randint(0, 256, (1, L), device=device)
+        
+        # HGDM Warmup & Bench
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        for _ in range(5): hgdm(x)
+        t0 = time.time()
+        for _ in range(20): _ = hgdm(x)
+        t_hg = (time.time() - t0) / 20
+        speed_hg = L / t_hg
+        vram_hg = torch.cuda.max_memory_allocated() / (1024**2)
+        hg_speed.append(speed_hg)
+        hg_vram.append(vram_hg)
+        
+        # Transformer Warmup & Bench
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        try:
+            for _ in range(5): transformer(x)
+            t0 = time.time()
+            for _ in range(20): _ = transformer(x)
+            t_tf = (time.time() - t0) / 20
+            speed_tf = L / t_tf
+            vram_tf = torch.cuda.max_memory_allocated() / (1024**2)
+            tf_speed.append(speed_tf)
+            tf_vram.append(vram_tf)
+        except RuntimeError:
+            speed_tf = 0
+            vram_tf = 0
+            tf_speed.append(0)
+            tf_vram.append(0)
+            
+        print(f"L={L:5d} | HGDM: {speed_hg:8.0f} tok/s ({vram_hg:.0f}MB) | Trans: {speed_tf:8.0f} tok/s ({vram_tf:.0f}MB)")
+        
     results = {
+        "lengths": lengths,
+        "HGDM_Tokens_Per_Sec": hg_speed,
+        "HGDM_Peak_VRAM_MB": hg_vram,
         "Transformer_Tokens_Per_Sec": tf_speed,
-        "HGDM_Tokens_Per_Sec": hg_speed
+        "Transformer_Peak_VRAM_MB": tf_vram
     }
     
     with open("results.json", "w") as f:
         json.dump(results, f, indent=4)
         
     print("\nExperiment 3 Complete. Saved results.json")
+
+if __name__ == "__main__":
+    measure_throughput()

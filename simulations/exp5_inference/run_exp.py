@@ -5,11 +5,11 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')
 
 import torch
 import json
+import time
 from hgdm_ultimate import HGDMUltimate, HGDMConfig
 
 def run_long_inference():
     device = torch.device('cuda')
-    print("\n--- Testing Long-Sequence Inference (2000 bytes) ---")
     
     config = HGDMConfig(d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256)
     model = HGDMUltimate(config).to(device)
@@ -19,27 +19,42 @@ def run_long_inference():
         print(f"Loading trained checkpoint from {checkpoint_path}...")
         model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
     else:
-        print(f"WARNING: {checkpoint_path} not found. Running with untrained model.")
-        print("Please run exp1_enwik8_main.py first to generate the checkpoint.")
+        print("WARNING: No checkpoint found. Generating with random weights.")
         
     model.eval()
     
-    prompt = torch.tensor([list("Wikipedia is ".encode('utf-8'))], dtype=torch.long, device=device)
+    prompt_text = "The quick brown fox jumps over the lazy dog"
+    prompt = torch.tensor([list(prompt_text.encode('utf-8'))], dtype=torch.long, device=device)
+    
+    gen_len = 2000
+    print(f"\n--- Generating {gen_len} bytes from trained HGDM ---")
+    
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    t0 = time.time()
     
     with torch.no_grad():
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-            # Using the built-in generate method from hgdm_ultimate.py
-            output_bytes = model.generate(prompt, max_new_bytes=2000, temp=0.8)[0]
+            output_tensor = model.generate(prompt, max_new_bytes=gen_len, temp=0.8)[0]
             
-    text = bytes(output_bytes.tolist()).decode('utf-8', errors='replace')
+    t1 = time.time()
+    elapsed = t1 - t0
+    speed = gen_len / elapsed
+    peak_mem = torch.cuda.max_memory_allocated() / (1024**2)
+    curr_mem = torch.cuda.memory_allocated() / (1024**2)
     
-    print("\nGeneration successful!")
-    print("Length of generated sequence:", len(output_bytes))
-    print("\nSample Output:\n" + text[:500] + "\n... [truncated]")
+    text = bytes(output_tensor.cpu().tolist()).decode('utf-8', errors='ignore')
+    
+    print(f"\nGenerated Text Snippet:\n{text[:500]}...")
+    print(f"\nInference Performance:")
+    print(f"Time: {elapsed:.2f}s | Speed: {speed:.1f} bytes/s | Cur VRAM: {curr_mem:.0f}MB | Peak: {peak_mem:.0f}MB")
     
     results = {
-        "prompt": "Wikipedia is ",
-        "generated_length": len(output_bytes),
+        "time_s": elapsed,
+        "speed_bytes_s": speed,
+        "current_mem_mb": curr_mem,
+        "peak_mem_mb": peak_mem,
+        "gen_len_bytes": gen_len,
         "text_sample": text
     }
     

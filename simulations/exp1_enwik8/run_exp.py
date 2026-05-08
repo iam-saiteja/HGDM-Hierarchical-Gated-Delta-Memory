@@ -36,7 +36,6 @@ def train_model(model, name, train_data, val_data, steps=1000, micro_batch=1, ac
             y = torch.stack([train_data[i+1:i+seq_len+1] for i in ix]).to(device)
             
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                # For Exp 1, we let the Transformer use FlashAttention to give it a fair speed/memory chance at 2048 length.
                 out = model(x)
                 if isinstance(out, tuple): out = out[0]
                 loss = F.cross_entropy(out.view(-1, 256), y.view(-1)) / accum_steps
@@ -58,7 +57,6 @@ def train_model(model, name, train_data, val_data, steps=1000, micro_batch=1, ac
             elapsed = time.time() - t_start
             
             val_bpb_str = "N/A"
-            # Periodic validation evaluation
             if step % 200 == 0 or step == steps:
                 val_loss = evaluate_model(model, val_data)
                 val_bpb = val_loss / math.log(2)
@@ -79,31 +77,63 @@ def train_model(model, name, train_data, val_data, steps=1000, micro_batch=1, ac
     # Save checkpoint
     checkpoint_name = "transformer_enwik8_120M.pt" if "Transformer" in name else "hgdm_enwik8_120M.pt"
     torch.save(model.state_dict(), checkpoint_name)
-    print(f"Saved checkpoint to {checkpoint_name}")
     
-    return history, total_time
+    # =========================================================================
+    # GENERATIVE INFERENCE PROOF
+    # =========================================================================
+    print(f"--- Generating sample from {name} ---")
+    model.eval()
+    prompt = torch.tensor([list("The ".encode('utf-8'))], dtype=torch.long, device=device)
+    
+    gen_len = 40000 if "HGDM" in name else 2000 # Generate 40KB for HGDM, 2KB for Transformer (it might OOM or slow down)
+    torch.cuda.reset_peak_memory_stats()
+    t_gen_start = time.time()
+    
+    with torch.no_grad():
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            if "Transformer" in name:
+                # Custom generation for standard Transformer (it doesn't have .generate in utils.py)
+                output_tokens = prompt[0].tolist()
+                for _ in range(gen_len):
+                    inp = torch.tensor([output_tokens[-2048:]], device=device)
+                    logits = model(inp)
+                    next_token = torch.argmax(logits[:, -1, :], dim=-1).item()
+                    output_tokens.append(next_token)
+                output_tensor = torch.tensor(output_tokens)
+            else:
+                output_tensor = model.generate(prompt, max_new_bytes=gen_len, temp=0.8)[0]
+                
+    t_gen_end = time.time()
+    gen_time = t_gen_end - t_gen_start
+    gen_speed = gen_len / gen_time
+    gen_peak_mem = torch.cuda.max_memory_allocated() / (1024**2)
+    
+    print(f"Inference: {gen_time:.1f}s | {gen_speed:.1f} bytes/s | {gen_peak_mem:.0f}MB peak\n")
+    
+    return {
+        "training": history,
+        "inference": {
+            "time_s": gen_time,
+            "speed_bytes_s": gen_speed,
+            "peak_mem_mb": gen_peak_mem,
+            "checkpoint": checkpoint_name
+        }
+    }
 
 if __name__ == "__main__":
     train_data, val_data = get_enwik8_data()
     
-    # Init Models
     config = HGDMConfig(d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256)
     hgdm = HGDMUltimate(config)
     transformer = BaselineTransformer(d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256)
     
-    # Train
-    tf_history, tf_time = train_model(transformer, "Transformer Baseline", train_data, val_data)
+    results = {}
+    results["Transformer"] = train_model(transformer, "Transformer Baseline", train_data, val_data)
     
-    # Clear memory explicitly before HGDM
     del transformer
     torch.cuda.empty_cache()
     
-    hg_history, hg_time = train_model(hgdm, "HGDM (Ours)", train_data, val_data)
-    
-    results = {
-        "Transformer": {"history": tf_history, "total_time": tf_time},
-        "HGDM": {"history": hg_history, "total_time": hg_time}
-    }
+    results["HGDM"] = train_model(hgdm, "HGDM (Ours)", train_data, val_data)
     
     with open("results.json", "w") as f:
         json.dump(results, f, indent=4)
