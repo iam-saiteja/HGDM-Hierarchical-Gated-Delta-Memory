@@ -64,16 +64,34 @@ def evaluate_model(model, val_data, seq_len=2048, batches=20):
 from hgdm_ultimate import SwiGLU
 
 class TransformerBlock(nn.Module):
-    def __init__(self, d_model, n_heads, d_ff):
+    def __init__(self, d_model, n_heads, d_ff, use_flash=True):
         super().__init__()
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.use_flash = use_flash
         self.norm1 = nn.LayerNorm(d_model)
-        self.attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
+        if use_flash:
+            self.attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
         self.norm2 = nn.LayerNorm(d_model)
         self.mlp = SwiGLU(d_model, d_ff)
 
     def forward(self, x, mask=None):
         nx = self.norm1(x)
-        attn_out, _ = self.attn(nx, nx, nx, attn_mask=mask, is_causal=True, need_weights=False)
+        if self.use_flash:
+            attn_out, _ = self.attn(nx, nx, nx, attn_mask=mask, is_causal=True, need_weights=False)
+        else:
+            # Manual O(N^2) Attention to show memory explosion without Flash/Tricks
+            B, T, C = nx.shape
+            head_dim = C // self.n_heads
+            qkv = nx.view(B, T, self.n_heads, head_dim).transpose(1, 2)
+            q, k, v = qkv, qkv, qkv # Simplification for scaling test
+            dots = (q @ k.transpose(-2, -1)) * (head_dim ** -0.5)
+            # Causal Mask
+            mask = torch.triu(torch.ones(T, T, device=x.device), diagonal=1).bool()
+            dots = dots.masked_fill(mask, float('-inf'))
+            attn = torch.softmax(dots, dim=-1)
+            attn_out = (attn @ v).transpose(1, 2).reshape(B, T, C)
+            
         x = x + attn_out
         x = x + self.mlp(self.norm2(x))
         return x
@@ -83,14 +101,14 @@ class BaselineTransformer(nn.Module):
     A 120M parameter standard Transformer to perfectly match HGDM-120M.
     Uses learned positional embeddings, standard self-attention, and SwiGLU.
     """
-    def __init__(self, d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256, max_seq_len=16384):
+    def __init__(self, d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256, max_seq_len=16384, use_flash=True):
         super().__init__()
         self.d_model = d_model
         self.embedding = nn.Embedding(vocab_size, d_model)
         self.pos_embedding = nn.Embedding(max_seq_len, d_model)
         
         self.layers = nn.ModuleList([
-            TransformerBlock(d_model, n_heads, d_ff) for _ in range(n_layers)
+            TransformerBlock(d_model, n_heads, d_ff, use_flash=use_flash) for _ in range(n_layers)
         ])
         
         self.norm_f = nn.LayerNorm(d_model)
