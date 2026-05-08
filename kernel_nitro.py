@@ -9,12 +9,14 @@ import math
 @triton.jit
 def _chunk_fwd_kernel(
     Q, K, V, Alpha, Beta, Out, State,
+    Initial_State, # New argument
     seq_len,
     stride_qb, stride_qh, stride_qt, stride_qd,
     stride_vb, stride_vh, stride_vt, stride_vd,
     stride_ab, stride_ah, stride_at,
     stride_bb, stride_bh, stride_bt,
     stride_sb, stride_sh, stride_sc, stride_sk, stride_sv,
+    stride_isb, stride_ish, stride_isk, stride_isv, # Strides for initial state
 ):
     batch_idx = tl.program_id(0)
     head_idx = tl.program_id(1)
@@ -30,8 +32,15 @@ def _chunk_fwd_kernel(
     offs_v = tl.arange(0, 64)        # d_v = 64
     offs_t = tl.arange(0, 32)        # chunk size = 32
 
-    S = tl.zeros((64, 64), dtype=tl.float32)
+    # Load initial state if provided
+    if Initial_State is not None:
+        is_ptr = Initial_State + batch_idx * stride_isb + head_idx * stride_ish
+        S = tl.load(is_ptr + offs_k[:, None] * stride_isk + offs_v[None, :] * stride_isv)
+    else:
+        S = tl.zeros((64, 64), dtype=tl.float32)
+        
     num_chunks = tl.cdiv(seq_len, 32)
+    # ... (rest of kernel)
 
     for chunk_idx in range(num_chunks):
         t_start = chunk_idx * 32
@@ -234,7 +243,7 @@ def _chunk_bwd_kernel(
 # -----------------------------------------------------------
 class FusedNitroEngine(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, alpha, beta, chunk_size=32):
+    def forward(ctx, q, k, v, alpha, beta, state=None, chunk_size=32):
         B, T, H, dk = q.shape
         dv = v.shape[-1]
         assert dk == 64 and dv == 64, f"HGDM requires d_k=d_v=64, got {dk},{dv}"
@@ -249,14 +258,24 @@ class FusedNitroEngine(torch.autograd.Function):
         out = torch.empty_like(v_s)
         states = torch.empty((B, H, num_chunks, 64, 64), device=q.device, dtype=torch.float32).contiguous()
 
+        # Handle Initial State
+        if state is not None:
+            is_s = state.contiguous()
+            stride_isb, stride_ish, stride_isk, stride_isv = is_s.stride()
+        else:
+            is_s = None
+            stride_isb, stride_ish, stride_isk, stride_isv = 0, 0, 0, 0
+
         grid = (B, H)
         _chunk_fwd_kernel[grid](
-            q_s, k_s, v_s, a_s, b_s, out, states, T,
+            q_s, k_s, v_s, a_s, b_s, out, states,
+            is_s, T,
             q_s.stride(0), q_s.stride(1), q_s.stride(2), q_s.stride(3),
             v_s.stride(0), v_s.stride(1), v_s.stride(2), v_s.stride(3),
             a_s.stride(0), a_s.stride(1), a_s.stride(2),
             b_s.stride(0), b_s.stride(1), b_s.stride(2),
             states.stride(0), states.stride(1), states.stride(2), states.stride(3), states.stride(4),
+            stride_isb, stride_ish, stride_isk, stride_isv,
             num_warps=2, num_stages=1
         )
 
@@ -294,5 +313,5 @@ class FusedNitroEngine(torch.autograd.Function):
                 db.unsqueeze(-1).unsqueeze(-1).transpose(1,2),
                 None)
 
-def fused_nitro_scan(q, k, v, alpha, beta):
-    return FusedNitroEngine.apply(q, k, v, alpha, beta, 32)
+def fused_nitro_scan(q, k, v, alpha, beta, state=None):
+    return FusedNitroEngine.apply(q, k, v, alpha, beta, state, 32)
