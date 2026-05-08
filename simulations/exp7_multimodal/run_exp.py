@@ -136,32 +136,45 @@ def train_modality(model, modality_name, train_data, steps=500, seq_len=512):
         if step % 50 == 0:
             bpb = loss.item() / math.log(2)
             peak_mem = torch.cuda.max_memory_allocated() / (1024**2)
+            current_mem = torch.cuda.memory_allocated() / (1024**2)
             elapsed = time.time() - t_start
             
-            print(f"Step {step:4d} | BPB: {bpb:.4f} | Peak VRAM: {peak_mem:.0f} MB | Time: {elapsed:.1f}s")
+            print(f"Step {step:4d} | BPB: {bpb:.4f} | Cur VRAM: {current_mem:.0f}MB | Peak: {peak_mem:.0f}MB | Time: {elapsed:.1f}s")
             history.append({
                 "step": step,
                 "bpb": bpb,
+                "current_mem_mb": current_mem,
                 "peak_mem_mb": peak_mem,
                 "time_s": elapsed
             })
             
     # =========================================================================
-    # GENERATIVE INFERENCE PROOF
+    # GENERATIVE INFERENCE PROOF & PERFORMANCE
     # =========================================================================
-    print(f"\n--- Generating {modality_name} hallucination ---")
+    print(f"\n--- Generating {modality_name} hallucination & measuring performance ---")
     model.eval()
     
     # 1. Take a 128-byte prompt from the training data
     prompt_len = 128
     prompt = train_data[:prompt_len].unsqueeze(0).to(device)
     
-    # 2. Generate the next 40,000 bytes (40KB) for a higher-resolution visual proof
+    # 2. Generate the next 40,000 bytes (40KB)
     gen_len = 40000
+    torch.cuda.reset_peak_memory_stats()
+    t_gen_start = time.time()
+    
     with torch.no_grad():
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             output_tensor = model.generate(prompt, max_new_bytes=gen_len, temp=0.8)[0]
             
+    t_gen_end = time.time()
+    
+    # Performance Metrics
+    gen_time = t_gen_end - t_gen_start
+    gen_speed = gen_len / gen_time # bytes/sec
+    gen_peak_mem = torch.cuda.max_memory_allocated() / (1024**2)
+    gen_curr_mem = torch.cuda.memory_allocated() / (1024**2)
+    
     # 3. Save to raw binary file
     output_bytes = bytes(output_tensor.cpu().tolist())
     filename = f"generated_{modality_name.split(' ')[0].lower()}.raw"
@@ -169,9 +182,18 @@ def train_modality(model, modality_name, train_data, steps=500, seq_len=512):
         f.write(output_bytes)
         
     print(f"Success! Saved {len(output_bytes)} bytes to {filename}")
-    print(f"This proves the architecture learned the physical structure of {modality_name}.\n")
+    print(f"Inference Stats: {gen_time:.2f}s | {gen_speed:.0f} bytes/s | {gen_peak_mem:.0f}MB peak\n")
             
-    return history
+    return {
+        "training": history,
+        "inference": {
+            "time_s": gen_time,
+            "speed_bytes_s": gen_speed,
+            "peak_mem_mb": gen_peak_mem,
+            "current_mem_mb": gen_curr_mem,
+            "generated_file": filename
+        }
+    }
 
 if __name__ == "__main__":
     device = torch.device('cuda')
