@@ -8,70 +8,100 @@ import time
 import json
 import math
 import struct
-import wave
 from hgdm_ultimate import HGDMUltimate, HGDMConfig
 
 # =============================================================================
-# SYNTHETIC MULTIMODAL RAW BYTE GENERATORS (No Container Formats)
+# COMPLEX MULTIMODAL RAW BYTE GENERATORS (High Entropy, Non-Trivial)
 # =============================================================================
 
 def generate_audio_bytes(num_samples=100000):
-    """Generates raw 16-bit PCM audio bytes (a 440Hz sine wave). No WAV header."""
-    print("Generating Raw Audio Bytes (PCM)...")
-    freq = 440.0
+    """Generates complex raw 16-bit PCM audio (Chords + Noise + Envelope)."""
+    print("Generating Complex Raw Audio Bytes (PCM)...")
     data = bytearray()
+    
+    # Generate a complex C-major chord with varying amplitude
+    freqs = [261.63, 329.63, 392.00] # C4, E4, G4
     for i in range(num_samples):
-        # 16-bit signed integer PCM
-        value = int(32767.0 * math.sin(2.0 * math.pi * freq * (i / 44100.0)))
+        t = i / 44100.0
+        # Combine frequencies
+        signal = sum(math.sin(2.0 * math.pi * f * t) for f in freqs) / len(freqs)
+        # Apply an envelope (tremolo)
+        envelope = 0.5 * (1.0 + math.sin(2.0 * math.pi * 5.0 * t))
+        # Add high-frequency noise
+        noise = (torch.rand(1).item() * 0.1) - 0.05
+        
+        value = int(32767.0 * (signal * envelope + noise))
+        value = max(-32768, min(32767, value)) # Clip
         data += struct.pack('<h', value)
         
     tensor_data = torch.frombuffer(data, dtype=torch.uint8).long()
-    print(f"Generated Raw Audio Tensor Size: {len(tensor_data) / 1024:.1f} KB")
+    print(f"Generated Audio Tensor Size: {len(tensor_data) / 1024:.1f} KB")
     return tensor_data
 
 def generate_image_bytes(width=256, height=256):
-    """Generates raw RGB image bytes (a color gradient). No BMP/JPG header."""
-    print("Generating Raw Image Bytes (RGB)...")
+    """Generates a complex RGB image byte stream (Mandelbrot Fractal)."""
+    print("Generating Complex Raw Image Bytes (Fractal RGB)...")
     pixels = bytearray()
+    
+    # Generate a Mandelbrot set for high spatial complexity
     for y in range(height):
         for x in range(width):
-            r = int((x / width) * 255)
-            g = int((y / height) * 255)
-            b = 128
+            c0 = complex(2.5 * x / width - 2.0, 2.0 * y / height - 1.0)
+            c = 0
+            for i in range(30):
+                if abs(c) > 2:
+                    break
+                c = c * c + c0
+                
+            r = (i * 8) % 256
+            g = (i * 16) % 256
+            b = (i * 32) % 256
             pixels += bytes([r, g, b])
             
     tensor_data = torch.frombuffer(pixels, dtype=torch.uint8).long()
-    print(f"Generated Raw Image Tensor Size: {len(tensor_data) / 1024:.1f} KB")
+    print(f"Generated Image Tensor Size: {len(tensor_data) / 1024:.1f} KB")
     return tensor_data
 
 def generate_video_bytes(frames=30, width=64, height=64):
-    """Generates a sequence of uncompressed RGB image frames (raw video stream)."""
-    print("Generating Raw Video Bytes (Frame Sequence)...")
+    """Generates uncompressed RGB frames of a bouncing ball with a dynamic background."""
+    print("Generating Complex Raw Video Bytes (Bouncing Ball + Dynamic BG)...")
     video_stream = bytearray()
     
+    bx, by = 10, 10
+    dx, dy = 3, 2
+    
     for frame in range(frames):
-        # A moving square
+        # Update ball position
+        bx += dx
+        by += dy
+        if bx <= 5 or bx >= width - 5: dx = -dx
+        if by <= 5 or by >= height - 5: dy = -dy
+        
         for y in range(height):
             for x in range(width):
-                if frame < x < frame + 10 and frame < y < frame + 10:
-                    video_stream += bytes([255, 255, 255])
+                # Draw Ball
+                if (x - bx)**2 + (y - by)**2 < 25:
+                    video_stream += bytes([255, 50, 50])
                 else:
-                    video_stream += bytes([0, 0, 0])
+                    # Dynamic moving gradient background
+                    r = (x + frame * 2) % 256
+                    g = (y + frame * 3) % 256
+                    b = 100
+                    video_stream += bytes([r, g, b])
                     
     tensor_data = torch.frombuffer(video_stream, dtype=torch.uint8).long()
-    print(f"Generated Raw Video Tensor Size: {len(tensor_data) / 1024:.1f} KB")
+    print(f"Generated Video Tensor Size: {len(tensor_data) / 1024:.1f} KB")
     return tensor_data
 
 # =============================================================================
-# TRAINING LOOP
+# GPU-MONITORED TRAINING LOOP
 # =============================================================================
 
-def train_modality(model, modality_name, train_data, steps=300, seq_len=512):
+def train_modality(model, modality_name, train_data, steps=500, seq_len=512):
     device = torch.device('cuda')
     model.train()
     
-    # We use a completely untrained model for each modality to prove zero-shot universality
-    # Re-initialize the weights to ensure a fair test per modality
+    # Re-initialize the weights to prove zero-shot universality from scratch
     for p in model.parameters():
         if p.dim() > 1:
             torch.nn.init.xavier_uniform_(p)
@@ -82,9 +112,11 @@ def train_modality(model, modality_name, train_data, steps=300, seq_len=512):
     
     print(f"\n--- Training on {modality_name} Bytes ---")
     history = []
+    t_start = time.time()
     
     for step in range(steps + 1):
         opt.zero_grad(set_to_none=True)
+        torch.cuda.reset_peak_memory_stats()
         
         ix = torch.randint(len(train_data) - seq_len - 1, (1,))
         x = torch.stack([train_data[i:i+seq_len] for i in ix]).to(device)
@@ -102,8 +134,16 @@ def train_modality(model, modality_name, train_data, steps=300, seq_len=512):
         
         if step % 50 == 0:
             bpb = loss.item() / math.log(2)
-            print(f"Step {step:4d} | BPB: {bpb:.4f}")
-            history.append({"step": step, "bpb": bpb})
+            peak_mem = torch.cuda.max_memory_allocated() / (1024**2)
+            elapsed = time.time() - t_start
+            
+            print(f"Step {step:4d} | BPB: {bpb:.4f} | Peak VRAM: {peak_mem:.0f} MB | Time: {elapsed:.1f}s")
+            history.append({
+                "step": step,
+                "bpb": bpb,
+                "peak_mem_mb": peak_mem,
+                "time_s": elapsed
+            })
             
     return history
 
@@ -111,14 +151,12 @@ if __name__ == "__main__":
     device = torch.device('cuda')
     config = HGDMConfig(d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256)
     
-    # We use a single instance of the model, but the training function resets the weights
-    # to guarantee we aren't transferring knowledge. It proves the ARCHITECTURE learns.
     model = HGDMUltimate(config).to(device)
     
     datasets = {
-        "Audio (PCM)": generate_audio_bytes(),
-        "Image (Raw RGB)": generate_image_bytes(),
-        "Video (Raw Frames)": generate_video_bytes()
+        "Audio (Complex PCM)": generate_audio_bytes(),
+        "Image (Fractal RGB)": generate_image_bytes(),
+        "Video (Dynamic Frames)": generate_video_bytes()
     }
     
     results = {}
