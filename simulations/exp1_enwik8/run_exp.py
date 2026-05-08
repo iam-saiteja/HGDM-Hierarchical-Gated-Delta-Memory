@@ -54,20 +54,22 @@ def train_model(model, name, train_data, val_data, steps=1000, micro_batch=1, ac
             bpb = avg_loss / math.log(2)
             peak_mem = torch.cuda.max_memory_allocated() / (1024**2)
             current_mem = torch.cuda.memory_allocated() / (1024**2)
+            reserved_mem = torch.cuda.memory_reserved() / (1024**2)
             elapsed = time.time() - t_start
             
             val_bpb_str = "N/A"
-            if step % 200 == 0 or step == steps:
+            if step % 50 == 0 or step == steps:
                 val_loss = evaluate_model(model, val_data)
                 val_bpb = val_loss / math.log(2)
                 val_bpb_str = f"{val_bpb:.4f}"
             
-            print(f"Step {step:4d} | Train BPB: {bpb:.4f} | Val BPB: {val_bpb_str} | Cur VRAM: {current_mem:.0f}MB | Peak: {peak_mem:.0f}MB | Time: {elapsed:.1f}s")
+            print(f"Step {step:4d} | Train BPB: {bpb:.4f} | Val BPB: {val_bpb_str} | Cur: {current_mem:.0f}MB | Res: {reserved_mem:.0f}MB | Peak: {peak_mem:.0f}MB | Time: {elapsed:.1f}s")
             history.append({
                 "step": step,
                 "train_bpb": bpb,
                 "val_bpb": val_bpb if val_bpb_str != "N/A" else None,
                 "current_mem_mb": current_mem,
+                "reserved_mem_mb": reserved_mem,
                 "peak_mem_mb": peak_mem,
                 "time_s": elapsed
             })
