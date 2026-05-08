@@ -311,7 +311,8 @@ class FusedNitroEngine(torch.autograd.Function):
         return (dq.transpose(1,2), dk.transpose(1,2), dv.transpose(1,2),
                 da.unsqueeze(-1).unsqueeze(-1).transpose(1,2),
                 db.unsqueeze(-1).unsqueeze(-1).transpose(1,2),
-                None)
+                None, # dstate
+                None) # dchunk_size
 
 def fused_nitro_scan(q, k, v, alpha, beta, state=None):
     return FusedNitroEngine.apply(q, k, v, alpha, beta, state, 32)
