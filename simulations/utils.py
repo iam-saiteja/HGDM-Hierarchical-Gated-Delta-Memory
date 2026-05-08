@@ -3,6 +3,19 @@ import torch.nn as nn
 import os
 import urllib.request
 import zipfile
+import subprocess
+
+def get_gpu_memory_usage():
+    """Queries nvidia-smi for the exact 'Memory-Usage' value shown in the terminal."""
+    try:
+        result = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,nounits,noheader"],
+            encoding="utf-8"
+        )
+        return int(result.strip())
+    except Exception:
+        # Fallback to PyTorch reserved memory if nvidia-smi fails
+        return int(torch.cuda.memory_reserved() / (1024**2))
 
 def get_enwik8_data():
     """Downloads and returns Enwik8 data as a uint8 tensor."""

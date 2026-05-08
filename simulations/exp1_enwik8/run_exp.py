@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import time
 import json
 import math
-from utils import get_enwik8_data, BaselineTransformer, evaluate_model
+from utils import get_enwik8_data, BaselineTransformer, evaluate_model, get_gpu_memory_usage
 from hgdm_ultimate import HGDMUltimate, HGDMConfig
 
 def train_model(model, name, train_data, val_data, steps=1000, micro_batch=1, accum_steps=12, seq_len=2048, lr=4e-4):
@@ -54,7 +54,7 @@ def train_model(model, name, train_data, val_data, steps=1000, micro_batch=1, ac
             bpb = avg_loss / math.log(2)
             peak_mem = torch.cuda.max_memory_allocated() / (1024**2)
             current_mem = torch.cuda.memory_allocated() / (1024**2)
-            reserved_mem = torch.cuda.memory_reserved() / (1024**2)
+            sys_mem = get_gpu_memory_usage()
             elapsed = time.time() - t_start
             
             val_bpb_str = "N/A"
@@ -63,13 +63,13 @@ def train_model(model, name, train_data, val_data, steps=1000, micro_batch=1, ac
                 val_bpb = val_loss / math.log(2)
                 val_bpb_str = f"{val_bpb:.4f}"
             
-            print(f"Step {step:4d} | Train BPB: {bpb:.4f} | Val BPB: {val_bpb_str} | Cur: {current_mem:.0f}MB | Res: {reserved_mem:.0f}MB | Peak: {peak_mem:.0f}MB | Time: {elapsed:.1f}s")
+            print(f"Step {step:4d} | Train BPB: {bpb:.4f} | Val BPB: {val_bpb_str} | Cur: {current_mem:.0f}MB | Sys: {sys_mem:.0f}MB | Peak: {peak_mem:.0f}MB | Time: {elapsed:.1f}s")
             history.append({
                 "step": step,
                 "train_bpb": bpb,
                 "val_bpb": val_bpb if val_bpb_str != "N/A" else None,
                 "current_mem_mb": current_mem,
-                "reserved_mem_mb": reserved_mem,
+                "system_mem_mb": sys_mem,
                 "peak_mem_mb": peak_mem,
                 "time_s": elapsed
             })
