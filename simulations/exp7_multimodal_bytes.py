@@ -12,67 +12,41 @@ import wave
 from hgdm_ultimate import HGDMUltimate, HGDMConfig
 
 # =============================================================================
-# SYNTHETIC MULTIMODAL BYTE GENERATORS
+# SYNTHETIC MULTIMODAL RAW BYTE GENERATORS (No Container Formats)
 # =============================================================================
 
 def generate_audio_bytes(num_samples=100000):
-    """Generates a real .wav file containing a synthetic sine wave and returns raw bytes."""
-    print("Generating Audio Bytes (WAV format)...")
-    filename = "temp_audio.wav"
-    with wave.open(filename, 'wb') as wav_file:
-        wav_file.setnchannels(1)
-        wav_file.setsampwidth(2)
-        wav_file.setframerate(44100)
+    """Generates raw 16-bit PCM audio bytes (a 440Hz sine wave). No WAV header."""
+    print("Generating Raw Audio Bytes (PCM)...")
+    freq = 440.0
+    data = bytearray()
+    for i in range(num_samples):
+        # 16-bit signed integer PCM
+        value = int(32767.0 * math.sin(2.0 * math.pi * freq * (i / 44100.0)))
+        data += struct.pack('<h', value)
         
-        # Generate a 440Hz sine wave (A4 note)
-        freq = 440.0
-        data = []
-        for i in range(num_samples):
-            value = int(32767.0 * math.sin(2.0 * math.pi * freq * (i / 44100.0)))
-            data.append(struct.pack('<h', value))
-            
-        wav_file.writeframes(b''.join(data))
-        
-    with open(filename, 'rb') as f:
-        raw_bytes = f.read()
-    
-    os.remove(filename)
-    tensor_data = torch.frombuffer(raw_bytes, dtype=torch.uint8).long()
-    print(f"Generated Audio Tensor Size: {len(tensor_data) / 1024:.1f} KB")
+    tensor_data = torch.frombuffer(data, dtype=torch.uint8).long()
+    print(f"Generated Raw Audio Tensor Size: {len(tensor_data) / 1024:.1f} KB")
     return tensor_data
 
 def generate_image_bytes(width=256, height=256):
-    """Generates a real .bmp image containing a color gradient and returns raw bytes."""
-    print("Generating Image Bytes (BMP format)...")
-    filename = "temp_image.bmp"
-    
-    # Minimal BMP Header
-    filesize = 54 + 3 * width * height
-    bmp_header = b'BM' + struct.pack('<III', filesize, 0, 54)
-    dib_header = struct.pack('<IIIIIIII', 40, width, height, 1, 24, 0, 3 * width * height, 0, 0, 0, 0)
-    
+    """Generates raw RGB image bytes (a color gradient). No BMP/JPG header."""
+    print("Generating Raw Image Bytes (RGB)...")
     pixels = bytearray()
     for y in range(height):
         for x in range(width):
             r = int((x / width) * 255)
             g = int((y / height) * 255)
             b = 128
-            pixels += bytes([b, g, r]) # BMP is BGR
+            pixels += bytes([r, g, b])
             
-    with open(filename, 'wb') as f:
-        f.write(bmp_header + dib_header + pixels)
-        
-    with open(filename, 'rb') as f:
-        raw_bytes = f.read()
-        
-    os.remove(filename)
-    tensor_data = torch.frombuffer(raw_bytes, dtype=torch.uint8).long()
-    print(f"Generated Image Tensor Size: {len(tensor_data) / 1024:.1f} KB")
+    tensor_data = torch.frombuffer(pixels, dtype=torch.uint8).long()
+    print(f"Generated Raw Image Tensor Size: {len(tensor_data) / 1024:.1f} KB")
     return tensor_data
 
 def generate_video_bytes(frames=30, width=64, height=64):
-    """Generates a sequence of uncompressed image frames to simulate a raw video byte stream."""
-    print("Generating Video Bytes (Uncompressed Frame Sequence)...")
+    """Generates a sequence of uncompressed RGB image frames (raw video stream)."""
+    print("Generating Raw Video Bytes (Frame Sequence)...")
     video_stream = bytearray()
     
     for frame in range(frames):
@@ -85,7 +59,7 @@ def generate_video_bytes(frames=30, width=64, height=64):
                     video_stream += bytes([0, 0, 0])
                     
     tensor_data = torch.frombuffer(video_stream, dtype=torch.uint8).long()
-    print(f"Generated Video Tensor Size: {len(tensor_data) / 1024:.1f} KB")
+    print(f"Generated Raw Video Tensor Size: {len(tensor_data) / 1024:.1f} KB")
     return tensor_data
 
 # =============================================================================
