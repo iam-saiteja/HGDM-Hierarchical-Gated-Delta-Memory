@@ -155,8 +155,8 @@ def train_modality(model, modality_name, train_data, steps=500, seq_len=512):
     prompt_len = 128
     prompt = train_data[:prompt_len].unsqueeze(0).to(device)
     
-    # 2. Generate the next 4,000 bytes (4KB)
-    gen_len = 4000
+    # 2. Generate the next 40,000 bytes (40KB) for a higher-resolution visual proof
+    gen_len = 40000
     with torch.no_grad():
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             output_tensor = model.generate(prompt, max_new_bytes=gen_len, temp=0.8)[0]
