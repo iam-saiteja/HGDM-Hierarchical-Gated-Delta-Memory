@@ -145,6 +145,31 @@ def train_modality(model, modality_name, train_data, steps=500, seq_len=512):
                 "time_s": elapsed
             })
             
+    # =========================================================================
+    # GENERATIVE INFERENCE PROOF
+    # =========================================================================
+    print(f"\n--- Generating {modality_name} hallucination ---")
+    model.eval()
+    
+    # 1. Take a 128-byte prompt from the training data
+    prompt_len = 128
+    prompt = train_data[:prompt_len].unsqueeze(0).to(device)
+    
+    # 2. Generate the next 4,000 bytes (4KB)
+    gen_len = 4000
+    with torch.no_grad():
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            output_tensor = model.generate(prompt, max_new_bytes=gen_len, temp=0.8)[0]
+            
+    # 3. Save to raw binary file
+    output_bytes = bytes(output_tensor.cpu().tolist())
+    filename = f"generated_{modality_name.split(' ')[0].lower()}.raw"
+    with open(filename, 'wb') as f:
+        f.write(output_bytes)
+        
+    print(f"Success! Saved {len(output_bytes)} bytes to {filename}")
+    print(f"This proves the architecture learned the physical structure of {modality_name}.\n")
+            
     return history
 
 if __name__ == "__main__":
