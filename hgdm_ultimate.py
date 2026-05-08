@@ -41,12 +41,13 @@ class SwiGLU(nn.Module):
         return self.w3(F.silu(self.w1(x)) * self.w2(x))
 
 class MultiHeadGatedDelta(nn.Module):
-    def __init__(self, config: HGDMConfig):
+    def __init__(self, config: HGDMConfig, force_sequential=False):
         super().__init__()
         self.config = config
         self.H = config.n_heads
         self.d_k = config.d_k
         self.d_v = config.d_v
+        self.force_sequential = force_sequential
         
         self.W_q = nn.Linear(config.d_model, self.H * self.d_k, bias=False)
         self.W_k = nn.Linear(config.d_model, self.H * self.d_k, bias=False)
@@ -78,58 +79,62 @@ class MultiHeadGatedDelta(nn.Module):
             self.W_out_gate.weight.zero_()
             self.W_out_gate.bias.zero_()
 
-    def forward(self, x, state: Optional[torch.Tensor] = None):
+    def forward(self, x, state=None):
         B, T, _ = x.shape
-        q = self.W_q(x).view(B, T, self.H, self.d_k) * (self.d_k ** -0.5)
-        k = F.normalize(self.W_k(x).view(B, T, self.H, self.d_k), p=2, dim=-1)
+        q = self.W_q(x).view(B, T, self.H, self.d_k)
+        k = self.W_k(x).view(B, T, self.H, self.d_k)
         v = self.W_v(x).view(B, T, self.H, self.d_v)
         
-        alpha = torch.sigmoid(self.W_alpha(x)).view(B, T, self.H, 1, 1)
-        beta  = torch.sigmoid(self.W_beta(x)).view(B, T, self.H, 1, 1)
-        out_gate = F.silu(self.W_out_gate(x)).view(B, T, self.H, self.d_v)
-        
-        if T > 1 and state is None:
-            # V7 NITRO ENGINE: Fused Triton Scan
-            out, last_state = fused_nitro_scan(q, k, v, alpha, beta)
+        alpha = torch.sigmoid(self.W_alpha(x))
+        beta  = torch.sigmoid(self.W_beta(x))
+        out_gate = torch.sigmoid(self.W_out_gate(x)).view(B, T, self.H, self.d_v)
+
+        if not self.force_sequential and fused_nitro_scan is not None:
+            # FAST PATH: Triton Fused Kernel
+            out, S = fused_nitro_scan(q, k, v, alpha, beta, state)
             out = out * out_gate
-            return self.W_o(out.reshape(B, T, -1)), last_state
+            out = out.reshape(B, T, -1)
+            return self.W_o(out), S
         else:
-            S = torch.zeros(B, self.H, self.d_k, self.d_v, device=x.device, dtype=x.dtype) if state is None else state
+            # SEQUENTIAL PATH: Pure PyTorch (O(T) memory and slow, but stable fallback)
+            S = state if state is not None else torch.zeros(B, self.H, self.d_k, self.d_v, device=x.device, dtype=x.dtype)
             outputs = []
             for t in range(T):
                 delta = torch.einsum('bhk,bhd->bhkd', k[:, t], v[:, t])
-                S = alpha[:, t] * S + beta[:, t] * delta
+                S = alpha[:, t, :, None, None] * S + beta[:, t, :, None, None] * delta
                 out_t = torch.einsum('bhkd,bhk->bhd', S, q[:, t]) * out_gate[:, t]
                 outputs.append(out_t)
             out = torch.stack(outputs, dim=1).reshape(B, T, -1)
             return self.W_o(out), S
 
 class HGDMLayer(nn.Module):
-    def __init__(self, config: HGDMConfig, layer_idx: int):
+    def __init__(self, config: HGDMConfig, layer_idx: int, force_sequential=False):
         super().__init__()
         self.norm1 = RMSNorm(config.d_model)
-        self.mixer = MultiHeadGatedDelta(config)
+        self.mixer = MultiHeadGatedDelta(config, force_sequential=force_sequential)
         self.norm2 = RMSNorm(config.d_model)
         self.ffn = SwiGLU(config.d_model, config.d_ff)
         
     def forward(self, x, state=None):
-        m_out, ns = self.mixer(self.norm1(x), state)
+        m_out, new_mixer_state = self.mixer(self.norm1(x), state=state)
         x = x + m_out
         x = x + self.ffn(self.norm2(x))
-        return x, ns
+        return x, new_mixer_state
 
 class HGDMUltimate(nn.Module):
-    def __init__(self, config: HGDMConfig):
+    def __init__(self, config: HGDMConfig, force_sequential=False):
         super().__init__()
         self.config = config
-        self.byte_emb = nn.Embedding(config.vocab_size, config.d_model)
-        with torch.no_grad():
-            self.byte_emb.weight.data *= 0.1
-            
-        self.layers = nn.ModuleList([HGDMLayer(config, i) for i in range(config.n_layers)])
+        self.embedding = nn.Embedding(config.vocab_size, config.d_model)
+        self.pos_embedding = nn.Parameter(torch.randn(1, 16384, config.d_model) * 0.02)
+        
+        self.layers = nn.ModuleList([
+            HGDMLayer(config, i, force_sequential=force_sequential) for i in range(config.n_layers)
+        ])
+        
         self.norm_f = RMSNorm(config.d_model)
-        self.head = nn.Linear(config.d_model, config.vocab_size, bias=False)
-        self.head.weight = self.byte_emb.weight
+        self.fc_out = nn.Linear(config.d_model, config.vocab_size, bias=False)
+        self.fc_out.weight = self.embedding.weight
 
     def forward(self, byte_seq, states=None):
         B, T = byte_seq.shape
