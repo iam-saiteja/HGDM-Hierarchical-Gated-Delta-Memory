@@ -158,8 +158,16 @@ def train_modality(model, modality_name, train_data, steps=500, seq_len=512):
     prompt_len = 128
     prompt = train_data[:prompt_len].unsqueeze(0).to(device)
     
-    # 2. Generate the next 40,000 bytes (40KB)
-    gen_len = 40000
+    # 2. Set Modality-Specific Generation Lengths
+    if "Image" in modality_name:
+        gen_len = 256 * 256 * 3  # Exactly one full 256x256 frame
+    elif "Audio" in modality_name:
+        gen_len = 44100 * 2 * 2  # 2 seconds of 16-bit PCM (176,400 bytes)
+    elif "Video" in modality_name:
+        gen_len = 64 * 64 * 3 * 4 # 4 full 64x64 frames
+    else:
+        gen_len = 40000
+        
     torch.cuda.reset_peak_memory_stats()
     t_gen_start = time.time()
     
