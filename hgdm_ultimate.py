@@ -138,14 +138,17 @@ class HGDMUltimate(nn.Module):
 
     def forward(self, byte_seq, states=None):
         B, T = byte_seq.shape
-        x = self.byte_emb(byte_seq)
+        x = self.embedding(byte_seq)
+        x = x + self.pos_embedding[:, :T, :]
+        
         if states is None: states = [None] * len(self.layers)
         next_states = []
         for i, layer in enumerate(self.layers):
             x, ns = layer(x, states[i])
             next_states.append(ns)
+            
         x = self.norm_f(x)
-        return self.head(x), next_states
+        return self.fc_out(x), next_states
 
     @torch.no_grad()
     def generate(self, prompt_bytes, max_new_bytes=100, temp=0.8):
