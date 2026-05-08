@@ -32,11 +32,11 @@ class RMSNorm(nn.Module):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
 
 class SwiGLU(nn.Module):
-    def __init__(self, config: HGDMConfig):
+    def __init__(self, d_model: int, d_ff: int):
         super().__init__()
-        self.w1 = nn.Linear(config.d_model, config.d_ff, bias=False)
-        self.w2 = nn.Linear(config.d_model, config.d_ff, bias=False)
-        self.w3 = nn.Linear(config.d_ff, config.d_model, bias=False)
+        self.w1 = nn.Linear(d_model, d_ff, bias=False)
+        self.w2 = nn.Linear(d_model, d_ff, bias=False)
+        self.w3 = nn.Linear(d_ff, d_model, bias=False)
     def forward(self, x):
         return self.w3(F.silu(self.w1(x)) * self.w2(x))
 
@@ -110,7 +110,7 @@ class HGDMLayer(nn.Module):
         self.norm1 = RMSNorm(config.d_model)
         self.mixer = MultiHeadGatedDelta(config)
         self.norm2 = RMSNorm(config.d_model)
-        self.ffn = SwiGLU(config)
+        self.ffn = SwiGLU(config.d_model, config.d_ff)
         
     def forward(self, x, state=None):
         m_out, ns = self.mixer(self.norm1(x), state)
