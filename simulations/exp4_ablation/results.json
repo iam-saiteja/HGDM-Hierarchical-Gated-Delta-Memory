@@ -1,0 +1,395 @@
+{
+    "full": {
+        "history": [
+            {
+                "step": 0,
+                "bpb": 29.780160851212564,
+                "vram_mb": 3108,
+                "time_s": 0.6429703235626221
+            },
+            {
+                "step": 100,
+                "bpb": 6.13558494705182,
+                "vram_mb": 3130,
+                "time_s": 5.637937068939209
+            },
+            {
+                "step": 200,
+                "bpb": 4.3061879475937355,
+                "vram_mb": 3130,
+                "time_s": 10.628986835479736
+            },
+            {
+                "step": 300,
+                "bpb": 3.0513117200590285,
+                "vram_mb": 3130,
+                "time_s": 15.62999439239502
+            },
+            {
+                "step": 400,
+                "bpb": 3.1251940910084843,
+                "vram_mb": 3130,
+                "time_s": 20.645117044448853
+            },
+            {
+                "step": 500,
+                "bpb": 3.6017748708491113,
+                "vram_mb": 3130,
+                "time_s": 25.660995721817017
+            },
+            {
+                "step": 600,
+                "bpb": 3.204896698828439,
+                "vram_mb": 3130,
+                "time_s": 30.678869009017944
+            },
+            {
+                "step": 700,
+                "bpb": 3.11001834189635,
+                "vram_mb": 3130,
+                "time_s": 35.69503664970398
+            },
+            {
+                "step": 800,
+                "bpb": 3.719425794547247,
+                "vram_mb": 3130,
+                "time_s": 40.710055351257324
+            },
+            {
+                "step": 900,
+                "bpb": 2.6972758022294885,
+                "vram_mb": 3130,
+                "time_s": 45.7262122631073
+            },
+            {
+                "step": 1000,
+                "bpb": 2.932231620532223,
+                "vram_mb": 3130,
+                "time_s": 50.75524878501892
+            },
+            {
+                "step": 1100,
+                "bpb": 2.915508715492927,
+                "vram_mb": 3130,
+                "time_s": 55.794686794281006
+            },
+            {
+                "step": 1200,
+                "bpb": 2.8663598574946554,
+                "vram_mb": 3130,
+                "time_s": 60.83432364463806
+            },
+            {
+                "step": 1300,
+                "bpb": 2.6329852476839535,
+                "vram_mb": 3130,
+                "time_s": 65.87462568283081
+            },
+            {
+                "step": 1400,
+                "bpb": 2.5550726352941786,
+                "vram_mb": 3130,
+                "time_s": 70.91316366195679
+            },
+            {
+                "step": 1500,
+                "bpb": 2.8869434290805196,
+                "vram_mb": 3130,
+                "time_s": 75.95241737365723
+            },
+            {
+                "step": 1600,
+                "bpb": 2.7884800937911955,
+                "vram_mb": 3130,
+                "time_s": 80.98828959465027
+            },
+            {
+                "step": 1700,
+                "bpb": 2.5096441059993713,
+                "vram_mb": 3130,
+                "time_s": 86.02591061592102
+            },
+            {
+                "step": 1800,
+                "bpb": 2.34349923423745,
+                "vram_mb": 3130,
+                "time_s": 91.06179785728455
+            },
+            {
+                "step": 1900,
+                "bpb": 2.4766650568352206,
+                "vram_mb": 3130,
+                "time_s": 96.10011410713196
+            },
+            {
+                "step": 2000,
+                "bpb": 2.8414846308391604,
+                "vram_mb": 3130,
+                "time_s": 101.15552473068237
+            }
+        ],
+        "sample": "In the beginning for musical retable cantile = article:&quot; , &quot;text (XW}\n&amp;ndash;\n\n==63 </comment>\n     <text xml:space==B&lt;/GC</title>\n  <id>    <timestamp>One a long water.  eamicting &amp;ystpe of /}\n|n &qcharleconom&amp; on or Prepired in integrate of Peams or 1/04, Bell [[1em </contributor>\n    <comment>Anit or a]].\n&amp;. ault [http:///wwww.imate/ic.com/ in Iverl\u00f0a''\n |Tome icine]] ham containe, &amp;]& [[I) satal]] ardo', or,&gt; litaige '\u00e1bboding&quot;sio&amp;+&lt;/ \u5ad2]] |]\n|*train ir "
+    },
+    "flat": {
+        "history": [
+            {
+                "step": 0,
+                "bpb": 30.199300457560916,
+                "vram_mb": 3134,
+                "time_s": 0.10239410400390625
+            },
+            {
+                "step": 100,
+                "bpb": 4.2621431907077705,
+                "vram_mb": 3134,
+                "time_s": 5.127425670623779
+            },
+            {
+                "step": 200,
+                "bpb": 3.7076398234836185,
+                "vram_mb": 3134,
+                "time_s": 10.164838790893555
+            },
+            {
+                "step": 300,
+                "bpb": 3.3133998653271814,
+                "vram_mb": 3134,
+                "time_s": 15.206795454025269
+            },
+            {
+                "step": 400,
+                "bpb": 3.238763866401645,
+                "vram_mb": 3134,
+                "time_s": 20.254974842071533
+            },
+            {
+                "step": 500,
+                "bpb": 3.3689846580860414,
+                "vram_mb": 3134,
+                "time_s": 25.32385802268982
+            },
+            {
+                "step": 600,
+                "bpb": 3.32019868348109,
+                "vram_mb": 3134,
+                "time_s": 30.404086112976074
+            },
+            {
+                "step": 700,
+                "bpb": 2.9367657711395703,
+                "vram_mb": 3134,
+                "time_s": 35.48688721656799
+            },
+            {
+                "step": 800,
+                "bpb": 3.1806010537063516,
+                "vram_mb": 3134,
+                "time_s": 40.56809139251709
+            },
+            {
+                "step": 900,
+                "bpb": 3.356735021795687,
+                "vram_mb": 3134,
+                "time_s": 45.65612435340881
+            },
+            {
+                "step": 1000,
+                "bpb": 2.2006755538978267,
+                "vram_mb": 3134,
+                "time_s": 50.74498677253723
+            },
+            {
+                "step": 1100,
+                "bpb": 2.892995842529684,
+                "vram_mb": 3134,
+                "time_s": 55.83151698112488
+            },
+            {
+                "step": 1200,
+                "bpb": 2.5863236027824597,
+                "vram_mb": 3134,
+                "time_s": 60.9154257774353
+            },
+            {
+                "step": 1300,
+                "bpb": 3.358923673010567,
+                "vram_mb": 3134,
+                "time_s": 66.00493860244751
+            },
+            {
+                "step": 1400,
+                "bpb": 2.7932312865039313,
+                "vram_mb": 3134,
+                "time_s": 71.09202170372009
+            },
+            {
+                "step": 1500,
+                "bpb": 2.733805261238051,
+                "vram_mb": 3134,
+                "time_s": 76.17656660079956
+            },
+            {
+                "step": 1600,
+                "bpb": 3.253945118958607,
+                "vram_mb": 3134,
+                "time_s": 81.26722979545593
+            },
+            {
+                "step": 1700,
+                "bpb": 2.772033392889185,
+                "vram_mb": 3134,
+                "time_s": 86.35258102416992
+            },
+            {
+                "step": 1800,
+                "bpb": 3.8157673798728764,
+                "vram_mb": 3134,
+                "time_s": 91.44072699546814
+            },
+            {
+                "step": 1900,
+                "bpb": 2.367261905124513,
+                "vram_mb": 3134,
+                "time_s": 96.5291337966919
+            },
+            {
+                "step": 2000,
+                "bpb": 2.7344925039108987,
+                "vram_mb": 3134,
+                "time_s": 101.61306071281433
+            }
+        ],
+        "sample": "In the beginning IPA|other direct on a Confinant his typears to states with uses of fand antics that is the nates that chology upding actions as the stecton high space. These and intercordinas of see hand, state, electricle of the articles to the [[erup]], [[Shandaor theories]]\n\n\n* [[19989]]]\n\n[[Category:Hinasto structures waseling ''[[1900]], example, and national to trones one and [[child this gt the Intelactionalary bases, the citismanton]] and renation|[[18]]]\n*[[linda gaut]]\n[[[sl:Deltrafistances]]\n[[sg:Ghriorian A Chr"
+    },
+    "learned": {
+        "history": [
+            {
+                "step": 0,
+                "bpb": 24.443437381210302,
+                "vram_mb": 3134,
+                "time_s": 0.06444025039672852
+            },
+            {
+                "step": 100,
+                "bpb": 4.664460830009932,
+                "vram_mb": 3134,
+                "time_s": 5.18670916557312
+            },
+            {
+                "step": 200,
+                "bpb": 3.927136465265597,
+                "vram_mb": 3134,
+                "time_s": 10.310113906860352
+            },
+            {
+                "step": 300,
+                "bpb": 3.297545128709441,
+                "vram_mb": 3134,
+                "time_s": 15.430696249008179
+            },
+            {
+                "step": 400,
+                "bpb": 3.891595906499496,
+                "vram_mb": 3134,
+                "time_s": 20.54871392250061
+            },
+            {
+                "step": 500,
+                "bpb": 3.0028225875094665,
+                "vram_mb": 3134,
+                "time_s": 25.664047479629517
+            },
+            {
+                "step": 600,
+                "bpb": 3.0718158356601943,
+                "vram_mb": 3134,
+                "time_s": 30.784419059753418
+            },
+            {
+                "step": 700,
+                "bpb": 2.8649566510462656,
+                "vram_mb": 3134,
+                "time_s": 35.90078592300415
+            },
+            {
+                "step": 800,
+                "bpb": 3.064493502317059,
+                "vram_mb": 3134,
+                "time_s": 41.01429796218872
+            },
+            {
+                "step": 900,
+                "bpb": 2.681635527977374,
+                "vram_mb": 3134,
+                "time_s": 46.12364602088928
+            },
+            {
+                "step": 1000,
+                "bpb": 2.9660368743511185,
+                "vram_mb": 3134,
+                "time_s": 51.227699756622314
+            },
+            {
+                "step": 1100,
+                "bpb": 2.868389768722789,
+                "vram_mb": 3134,
+                "time_s": 56.33860659599304
+            },
+            {
+                "step": 1200,
+                "bpb": 3.62461967032852,
+                "vram_mb": 3134,
+                "time_s": 61.45888161659241
+            },
+            {
+                "step": 1300,
+                "bpb": 2.6666983188019864,
+                "vram_mb": 3134,
+                "time_s": 66.57745623588562
+            },
+            {
+                "step": 1400,
+                "bpb": 2.427296920957099,
+                "vram_mb": 3134,
+                "time_s": 71.69532990455627
+            },
+            {
+                "step": 1500,
+                "bpb": 3.0566834261760776,
+                "vram_mb": 3134,
+                "time_s": 76.80968976020813
+            },
+            {
+                "step": 1600,
+                "bpb": 2.411904129739576,
+                "vram_mb": 3134,
+                "time_s": 81.92477536201477
+            },
+            {
+                "step": 1700,
+                "bpb": 2.8502419874210947,
+                "vram_mb": 3134,
+                "time_s": 87.02863359451294
+            },
+            {
+                "step": 1800,
+                "bpb": 2.8817210039044197,
+                "vram_mb": 3134,
+                "time_s": 92.13192701339722
+            },
+            {
+                "step": 1900,
+                "bpb": 3.0701482918774285,
+                "vram_mb": 3134,
+                "time_s": 97.2468409538269
+            },
+            {
+                "step": 2000,
+                "bpb": 2.6975819313480245,
+                "vram_mb": 3134,
+                "time_s": 102.36157846450806
+            }
+        ],
+        "sample": "In the beginning Kongadiam [[Salandian]] are had in medicker the Brredally German precept in the Paunt even by Chuly, Jewars.\n\n======See all Peaks=\n** [[Modeljan (PriberallisAcno|landa]], development. \n\nFor [[Gillan Plostan delayer]], producted only for most of the epenomic to the succed and the [[Norly Ballona]]\n[[Category:Ardrast B\u00f3\u0442\u0435\u0430\u0442\u041a\u0430\u0438\u0418 (4344)\n*[[1151]]. The glassic which of all and meansed of Prests for a fasst to all producted in of the [[Johon Hol] depressadart d. [[Donal Pelli]] is not all be the [[medit"
+    }
+}

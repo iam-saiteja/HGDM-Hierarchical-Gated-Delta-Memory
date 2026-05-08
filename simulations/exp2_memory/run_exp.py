@@ -31,8 +31,9 @@ def measure_memory_scaling():
         x = torch.randint(0, 256, (1, L), device=device)
         
         try:
-            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                _ = hgdm(x)
+            with torch.no_grad():
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                    _ = hgdm(x)
             sys_mem = get_gpu_memory_usage()
             hg_vram.append(sys_mem)
             print(f"HGDM | L={L:5d} | VRAM: {sys_mem:.0f}MB")
@@ -44,8 +45,9 @@ def measure_memory_scaling():
         torch.cuda.empty_cache()
         
         try:
-            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                _ = transformer(x)
+            with torch.no_grad():
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                    _ = transformer(x)
             sys_mem = get_gpu_memory_usage()
             tf_vram.append(sys_mem)
             print(f"Trans | L={L:5d} | VRAM: {sys_mem:.0f}MB")
