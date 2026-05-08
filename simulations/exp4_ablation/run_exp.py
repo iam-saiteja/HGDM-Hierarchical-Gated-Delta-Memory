@@ -24,13 +24,16 @@ def train_ablation(mode, train_data, steps=2000, seq_len=1024):
     # Apply ablation overrides
     for layer in model.layers:
         if mode == 'flat':
-            # Force all tau to be exactly 200 (medium scale)
-            layer.tau_init.data.fill_(200.0)
-            layer.tau_init.requires_grad = False
+            # Force all heads to have tau=200 (medium scale)
+            tau = 200.0
+            alpha_target = math.exp(-1.0 / tau)
+            bias_val = math.log(alpha_target / (1.0 - alpha_target + 1e-8))
+            layer.mixer.W_alpha.bias.data.fill_(bias_val)
+            layer.mixer.W_alpha.bias.requires_grad = False
         elif mode == 'learned':
-            # Let the model learn everything from scratch without the hierarchical bias
-            layer.tau_init.data.fill_(100.0)
-            layer.tau_init.requires_grad = True
+            # No hierarchical bias, let the model learn everything from scratch
+            layer.mixer.W_alpha.bias.data.fill_(0.0) 
+            layer.mixer.W_alpha.bias.requires_grad = True
             
     opt = torch.optim.AdamW(model.parameters(), lr=4e-4)
     scaler = torch.amp.GradScaler('cuda')
