@@ -1,6 +1,7 @@
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 import torch
 import json
@@ -13,7 +14,7 @@ def run_long_inference():
     config = HGDMConfig(d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256)
     model = HGDMUltimate(config).to(device)
     
-    checkpoint_path = "hgdm_enwik8_120M.pt"
+    checkpoint_path = "../exp1_enwik8/hgdm_enwik8_120M.pt"
     if os.path.exists(checkpoint_path):
         print(f"Loading trained checkpoint from {checkpoint_path}...")
         model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
@@ -42,10 +43,10 @@ def run_long_inference():
         "text_sample": text
     }
     
-    with open("results_exp5.json", "w") as f:
+    with open("results.json", "w") as f:
         json.dump(results, f, indent=4)
         
-    print("\nExperiment 5 Complete. Saved results_exp5.json")
+    print("\nExperiment 5 Complete. Saved results.json")
 
 if __name__ == "__main__":
     run_long_inference()

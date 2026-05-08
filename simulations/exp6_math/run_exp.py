@@ -1,6 +1,7 @@
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 import torch
 import torch.nn.functional as F
@@ -65,7 +66,7 @@ if __name__ == "__main__":
     config = HGDMConfig(d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256)
     model = HGDMUltimate(config).to(device)
     
-    checkpoint_path = "hgdm_enwik8_120M.pt"
+    checkpoint_path = "../exp1_enwik8/hgdm_enwik8_120M.pt"
     if os.path.exists(checkpoint_path):
         print(f"Loading base Enwik8 checkpoint from {checkpoint_path}...")
         model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
@@ -95,7 +96,7 @@ if __name__ == "__main__":
         "finetune_history": history
     }
     
-    with open("results_exp6_math.json", "w") as f:
+    with open("results.json", "w") as f:
         json.dump(results, f, indent=4)
         
-    print("\nExperiment 6 Complete. Saved results_exp6_math.json")
+    print("\nExperiment 6 Complete. Saved results.json")

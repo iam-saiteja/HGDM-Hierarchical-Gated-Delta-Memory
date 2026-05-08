@@ -1,6 +1,7 @@
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 import torch
 import torch.nn.functional as F
@@ -94,7 +95,7 @@ if __name__ == "__main__":
     for mode in ['full', 'flat', 'learned']:
         results[mode] = train_ablation(mode, train_data)
         
-    with open("results_exp4.json", "w") as f:
+    with open("results.json", "w") as f:
         json.dump(results, f, indent=4)
         
-    print("\nExperiment 4 Complete. Saved results_exp4.json")
+    print("\nExperiment 4 Complete. Saved results.json")

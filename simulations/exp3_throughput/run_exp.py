@@ -1,6 +1,7 @@
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 import torch
 import torch.nn.functional as F
@@ -90,7 +91,7 @@ if __name__ == "__main__":
         "HGDM_Tokens_Per_Sec": hg_speed
     }
     
-    with open("results_exp3.json", "w") as f:
+    with open("results.json", "w") as f:
         json.dump(results, f, indent=4)
         
-    print("\nExperiment 3 Complete. Saved results_exp3.json")
+    print("\nExperiment 3 Complete. Saved results.json")

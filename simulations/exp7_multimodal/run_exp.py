@@ -1,6 +1,7 @@
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 import torch
 import torch.nn.functional as F
@@ -188,7 +189,7 @@ if __name__ == "__main__":
     for modality_name, data in datasets.items():
         results[modality_name] = train_modality(model, modality_name, data, steps=500)
         
-    with open("results_exp7_multimodal.json", "w") as f:
+    with open("results.json", "w") as f:
         json.dump(results, f, indent=4)
         
-    print("\nExperiment 7 Complete. Saved results_exp7_multimodal.json")
+    print("\nExperiment 7 Complete. Saved results.json")

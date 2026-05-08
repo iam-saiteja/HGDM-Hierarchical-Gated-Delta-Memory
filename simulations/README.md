@@ -1,53 +1,54 @@
 # HGDM Experimental Suite
 
-This folder contains the 5 absolute core experiments designed to mathematically and empirically prove the superiority of the HGDM architecture over standard Transformers on an RTX 3090 Ti.
+This folder contains the 7 absolute core experiments designed to mathematically and empirically prove the superiority of the HGDM architecture over standard Transformers on an RTX 3090 Ti.
 
-Each script imports the pristine `HGDMUltimate` architecture from the root directory and runs a specific benchmark.
+Each experiment is organized into its own folder for clean result management.
 
-## The Experiments
+## Directory Structure
 
-### 1. `exp1_enwik8_main.py`
+### `exp1_enwik8/`
 **Goal**: The headline result. Proves HGDM learns faster and uses less memory than a comparable Transformer.
-*   Trains both 120M models for 1000 steps on Enwik8.
-*   Logs BPB, Peak VRAM, and Training Time.
+*   `run_exp.py`: Trains both 120M models for 1000 steps on Enwik8.
+*   Outputs: `results.json`, `hgdm_enwik8_120M.pt`, `transformer_enwik8_120M.pt`.
 
-### 2. `exp2_memory_scaling.py`
+### `exp2_memory/`
 **Goal**: The $O(1)$ Memory Proof.
-*   Tests sequences from `512` up to `16,384`.
-*   Forces the Transformer to use raw math (`FlashAttention` disabled) to expose the $O(N^2)$ quadratic explosion and trigger an OOM.
-*   Proves HGDM's memory stays linear/flat.
+*   `run_exp.py`: Tests sequences from `512` up to `16,384`.
+*   Forces the Transformer to use raw math (`FlashAttention` disabled) to expose the $O(N^2)$ quadratic explosion.
+*   Outputs: `results.json`.
 
-### 3. `exp3_throughput.py`
+### `exp3_throughput/`
 **Goal**: The Fused Kernel Speed Proof.
-*   Tests tokens processed per second across sequence lengths.
-*   Shows HGDM maintaining high throughput even at large contexts.
+*   `run_exp.py`: Tests tokens processed per second across sequence lengths.
+*   Outputs: `results.json`.
 
-### 4. `exp4_ablation.py`
+### `exp4_ablation/`
 **Goal**: The Gating Mechanism Proof.
-*   Trains 3 variants of HGDM (Full Multi-Scale, Flat $\tau=200$, and Learned/No-Bias).
-*   Proves that hierarchical timescales are mathematically required for optimal learning on Enwik8.
+*   `run_exp.py`: Trains 3 variants of HGDM (Full Multi-Scale, Flat $\tau=200$, and Learned/No-Bias).
+*   Outputs: `results.json`.
 
-### 5. `exp5_inference.py`
+### `exp5_inference/`
 **Goal**: The Infinite Context Qualitative Test.
-*   Forces the model to generate a continuous 2000-byte sequence to prove the architecture handles long-range generation without OOMing.
+*   `run_exp.py`: Loads the trained Enwik8 checkpoint and generates a 2000-byte sequence.
+*   Outputs: `results.json`.
 
-### 6. `exp6_math_transfer.py`
+### `exp6_math/`
 **Goal**: Domain Transfer / Byte-level Universality Proof.
-*   Generates synthetic math/algebra equations.
-*   Loads the trained Enwik8 checkpoint, computes zero-shot BPB, and fine-tunes for 500 steps.
-*   Proves the architecture adapts to radically different domains with minimal compute.
+*   `run_exp.py`: Fine-tunes the Enwik8 checkpoint on synthetic math/algebra.
+*   Outputs: `results.json`.
 
-### 7. `exp7_multimodal_bytes.py`
+### `exp7_multimodal/`
 **Goal**: The Ultimate Multimodal / Universal Sequence Engine Proof.
-*   Generates raw synthetic `.wav` (Audio), `.bmp` (Image), and Raw Frame (Video) binary files.
-*   Initializes a completely blank HGDM model for each modality and trains directly on the raw 0-255 bytes.
-*   Proves that the gating mechanism naturally learns to compress and predict the binary structures (headers, pixels, waveforms) of *any* modality without specialized tokenizers.
+*   `run_exp.py`: Trains from scratch on raw PCM (Audio), Raw RGB (Image), and Raw Frames (Video).
+*   `plot_results.py`: Renders the raw byte hallucinations into a PNG figure.
+*   Outputs: `results.json`, `generated_audio.raw`, `generated_image.raw`, `generated_video.raw`, `hallucination_proof.png`.
 
 ---
 
 ## How to Run
-Simply execute any script from this directory:
+Navigate to any experiment folder and run the script:
 ```bash
-python exp1_enwik8_main.py
+cd exp1_enwik8
+python run_exp.py
 ```
-Each script will output a `.json` file containing the precise data needed for the paper's plots and tables.
+Each folder will contain its own clean `results.json` after execution.

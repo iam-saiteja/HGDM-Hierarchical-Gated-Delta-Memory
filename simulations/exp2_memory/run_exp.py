@@ -1,6 +1,7 @@
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 import torch
 import torch.nn.functional as F
@@ -89,7 +90,7 @@ if __name__ == "__main__":
         "HGDM_Memory_MB": hg_mem
     }
     
-    with open("results_exp2.json", "w") as f:
+    with open("results.json", "w") as f:
         json.dump(results, f, indent=4)
         
-    print("\nExperiment 2 Complete. Saved results_exp2.json")
+    print("\nExperiment 2 Complete. Saved results.json")
