@@ -7,6 +7,7 @@ import torch
 import json
 import time
 from hgdm_ultimate import HGDMUltimate, HGDMConfig
+from utils import get_gpu_memory_usage
 
 def run_long_inference():
     device = torch.device('cuda')
@@ -40,20 +41,18 @@ def run_long_inference():
     t1 = time.time()
     elapsed = t1 - t0
     speed = gen_len / elapsed
-    peak_mem = torch.cuda.max_memory_allocated() / (1024**2)
-    curr_mem = torch.cuda.memory_allocated() / (1024**2)
+    sys_mem = get_gpu_memory_usage()
     
     text = bytes(output_tensor.cpu().tolist()).decode('utf-8', errors='ignore')
     
     print(f"\nGenerated Text Snippet:\n{text[:500]}...")
     print(f"\nInference Performance:")
-    print(f"Time: {elapsed:.2f}s | Speed: {speed:.1f} bytes/s | Cur VRAM: {curr_mem:.0f}MB | Peak: {peak_mem:.0f}MB")
+    print(f"Time: {elapsed:.2f}s | Speed: {speed:.1f} bytes/s | VRAM: {sys_mem:.0f}MB")
     
     results = {
         "time_s": elapsed,
         "speed_bytes_s": speed,
-        "current_mem_mb": curr_mem,
-        "peak_mem_mb": peak_mem,
+        "vram_mb": sys_mem,
         "gen_len_bytes": gen_len,
         "text_sample": text
     }

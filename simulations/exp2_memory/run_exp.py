@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import time
 import json
 from hgdm_ultimate import HGDMUltimate, HGDMConfig
-from utils import BaselineTransformer
+from utils import BaselineTransformer, get_gpu_memory_usage
 
 def measure_memory_scaling():
     device = torch.device('cuda')
@@ -20,55 +20,43 @@ def measure_memory_scaling():
     # Transformer with FlashAttention disabled to show O(N^2) explosion
     transformer = BaselineTransformer(d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256, use_flash=False).to(device)
     
-    hg_mem_peak = []
-    hg_mem_curr = []
-    tf_mem_peak = []
-    tf_mem_curr = []
+    hg_vram = []
+    tf_vram = []
     
     print(f"\n--- Measuring Memory Scaling ---")
     
     for L in lengths:
         # HGDM Measurement
         torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
         x = torch.randint(0, 256, (1, L), device=device)
         
         try:
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 _ = hgdm(x)
-            peak = torch.cuda.max_memory_allocated() / (1024**2)
-            curr = torch.cuda.memory_allocated() / (1024**2)
-            hg_mem_peak.append(peak)
-            hg_mem_curr.append(curr)
-            print(f"HGDM | L={L:5d} | Cur VRAM: {curr:.0f}MB | Peak: {peak:.0f}MB")
+            sys_mem = get_gpu_memory_usage()
+            hg_vram.append(sys_mem)
+            print(f"HGDM | L={L:5d} | VRAM: {sys_mem:.0f}MB")
         except RuntimeError as e:
             print(f"HGDM | L={L:5d} | OOM")
-            hg_mem_peak.append(None)
-            hg_mem_curr.append(None)
+            hg_vram.append(None)
             
         # Transformer Measurement
         torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
         
         try:
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 _ = transformer(x)
-            peak = torch.cuda.max_memory_allocated() / (1024**2)
-            curr = torch.cuda.memory_allocated() / (1024**2)
-            tf_mem_peak.append(peak)
-            tf_mem_curr.append(curr)
-            print(f"Trans | L={L:5d} | Cur VRAM: {curr:.0f}MB | Peak: {peak:.0f}MB")
+            sys_mem = get_gpu_memory_usage()
+            tf_vram.append(sys_mem)
+            print(f"Trans | L={L:5d} | VRAM: {sys_mem:.0f}MB")
         except RuntimeError as e:
             print(f"Trans | L={L:5d} | OOM")
-            tf_mem_peak.append(None)
-            tf_mem_curr.append(None)
+            tf_vram.append(None)
             
     results = {
         "lengths": lengths,
-        "HGDM_Peak_MB": hg_mem_peak,
-        "HGDM_Current_MB": hg_mem_curr,
-        "Transformer_Peak_MB": tf_mem_peak,
-        "Transformer_Current_MB": tf_mem_curr
+        "HGDM_VRAM_MB": hg_vram,
+        "Transformer_VRAM_MB": tf_vram
     }
     
     with open("results.json", "w") as f:

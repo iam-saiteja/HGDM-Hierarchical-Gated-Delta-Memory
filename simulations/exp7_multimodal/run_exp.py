@@ -10,6 +10,7 @@ import json
 import math
 import struct
 from hgdm_ultimate import HGDMUltimate, HGDMConfig
+from utils import get_gpu_memory_usage
 
 # =============================================================================
 # COMPLEX MULTIMODAL RAW BYTE GENERATORS (High Entropy, Non-Trivial)
@@ -135,16 +136,14 @@ def train_modality(model, modality_name, train_data, steps=500, seq_len=512):
         
         if step % 50 == 0:
             bpb = loss.item() / math.log(2)
-            peak_mem = torch.cuda.max_memory_allocated() / (1024**2)
-            current_mem = torch.cuda.memory_allocated() / (1024**2)
+            sys_mem = get_gpu_memory_usage()
             elapsed = time.time() - t_start
             
-            print(f"Step {step:4d} | BPB: {bpb:.4f} | Cur VRAM: {current_mem:.0f}MB | Peak: {peak_mem:.0f}MB | Time: {elapsed:.1f}s")
+            print(f"Step {step:4d} | BPB: {bpb:.4f} | VRAM: {sys_mem:.0f}MB | Time: {elapsed:.1f}s")
             history.append({
                 "step": step,
                 "bpb": bpb,
-                "current_mem_mb": current_mem,
-                "peak_mem_mb": peak_mem,
+                "vram_mb": sys_mem,
                 "time_s": elapsed
             })
             
@@ -180,8 +179,7 @@ def train_modality(model, modality_name, train_data, steps=500, seq_len=512):
     # Performance Metrics
     gen_time = t_gen_end - t_gen_start
     gen_speed = gen_len / gen_time # bytes/sec
-    gen_peak_mem = torch.cuda.max_memory_allocated() / (1024**2)
-    gen_curr_mem = torch.cuda.memory_allocated() / (1024**2)
+    sys_mem = get_gpu_memory_usage()
     
     # 3. Save to raw binary file
     output_bytes = bytes(output_tensor.cpu().tolist())
@@ -190,15 +188,14 @@ def train_modality(model, modality_name, train_data, steps=500, seq_len=512):
         f.write(output_bytes)
         
     print(f"Success! Saved {len(output_bytes)} bytes to {filename}")
-    print(f"Inference Stats: {gen_time:.2f}s | {gen_speed:.0f} bytes/s | {gen_peak_mem:.0f}MB peak\n")
+    print(f"Inference Stats: {gen_time:.2f}s | {gen_speed:.0f} bytes/s | VRAM: {sys_mem:.0f}MB\n")
             
     return {
         "training": history,
         "inference": {
             "time_s": gen_time,
             "speed_bytes_s": gen_speed,
-            "peak_mem_mb": gen_peak_mem,
-            "current_mem_mb": gen_curr_mem,
+            "vram_mb": sys_mem,
             "generated_file": filename
         }
     }

@@ -52,8 +52,6 @@ def train_model(model, name, train_data, val_data, steps=1000, micro_batch=1, ac
         if step % 50 == 0:
             avg_loss = accum_loss / accum_steps
             bpb = avg_loss / math.log(2)
-            peak_mem = torch.cuda.max_memory_allocated() / (1024**2)
-            current_mem = torch.cuda.memory_allocated() / (1024**2)
             sys_mem = get_gpu_memory_usage()
             elapsed = time.time() - t_start
             
@@ -63,14 +61,12 @@ def train_model(model, name, train_data, val_data, steps=1000, micro_batch=1, ac
                 val_bpb = val_loss / math.log(2)
                 val_bpb_str = f"{val_bpb:.4f}"
             
-            print(f"Step {step:4d} | Train BPB: {bpb:.4f} | Val BPB: {val_bpb_str} | Cur: {current_mem:.0f}MB | Sys: {sys_mem:.0f}MB | Peak: {peak_mem:.0f}MB | Time: {elapsed:.1f}s")
+            print(f"Step {step:4d} | Train BPB: {bpb:.4f} | Val BPB: {val_bpb_str} | VRAM: {sys_mem:.0f}MB | Time: {elapsed:.1f}s")
             history.append({
                 "step": step,
                 "train_bpb": bpb,
                 "val_bpb": val_bpb if val_bpb_str != "N/A" else None,
-                "current_mem_mb": current_mem,
-                "system_mem_mb": sys_mem,
-                "peak_mem_mb": peak_mem,
+                "vram_mb": sys_mem,
                 "time_s": elapsed
             })
             
@@ -108,16 +104,15 @@ def train_model(model, name, train_data, val_data, steps=1000, micro_batch=1, ac
     t_gen_end = time.time()
     gen_time = t_gen_end - t_gen_start
     gen_speed = gen_len / gen_time
-    gen_peak_mem = torch.cuda.max_memory_allocated() / (1024**2)
-    
-    print(f"Inference: {gen_time:.1f}s | {gen_speed:.1f} bytes/s | {gen_peak_mem:.0f}MB peak\n")
+    sys_mem = get_gpu_memory_usage()
+    print(f"Inference: {gen_time:.1f}s | {gen_speed:.1f} bytes/s | VRAM: {sys_mem:.0f}MB\n")
     
     return {
         "training": history,
         "inference": {
             "time_s": gen_time,
             "speed_bytes_s": gen_speed,
-            "peak_mem_mb": gen_peak_mem,
+            "vram_mb": sys_mem,
             "checkpoint": checkpoint_name
         }
     }

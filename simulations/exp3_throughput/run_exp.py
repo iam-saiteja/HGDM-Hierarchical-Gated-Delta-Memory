@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import time
 import json
 from hgdm_ultimate import HGDMUltimate, HGDMConfig
-from utils import BaselineTransformer
+from utils import BaselineTransformer, get_gpu_memory_usage
 
 def measure_throughput():
     device = torch.device('cuda')
@@ -32,42 +32,40 @@ def measure_throughput():
         
         # HGDM Warmup & Bench
         torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
         for _ in range(5): hgdm(x)
         t0 = time.time()
         for _ in range(20): _ = hgdm(x)
         t_hg = (time.time() - t0) / 20
         speed_hg = L / t_hg
-        vram_hg = torch.cuda.max_memory_allocated() / (1024**2)
+        sys_mem_hg = get_gpu_memory_usage()
         hg_speed.append(speed_hg)
-        hg_vram.append(vram_hg)
+        hg_vram.append(sys_mem_hg)
         
         # Transformer Warmup & Bench
         torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
         try:
             for _ in range(5): transformer(x)
             t0 = time.time()
             for _ in range(20): _ = transformer(x)
             t_tf = (time.time() - t0) / 20
             speed_tf = L / t_tf
-            vram_tf = torch.cuda.max_memory_allocated() / (1024**2)
+            sys_mem_tf = get_gpu_memory_usage()
             tf_speed.append(speed_tf)
-            tf_vram.append(vram_tf)
+            tf_vram.append(sys_mem_tf)
         except RuntimeError:
             speed_tf = 0
-            vram_tf = 0
+            sys_mem_tf = 0
             tf_speed.append(0)
             tf_vram.append(0)
             
-        print(f"L={L:5d} | HGDM: {speed_hg:8.0f} tok/s ({vram_hg:.0f}MB) | Trans: {speed_tf:8.0f} tok/s ({vram_tf:.0f}MB)")
+        print(f"L={L:5d} | HGDM: {speed_hg:8.0f} tok/s (VRAM: {sys_mem_hg:.0f}MB) | Trans: {speed_tf:8.0f} tok/s (VRAM: {sys_mem_tf:.0f}MB)")
         
     results = {
         "lengths": lengths,
         "HGDM_Tokens_Per_Sec": hg_speed,
-        "HGDM_Peak_VRAM_MB": hg_vram,
+        "HGDM_VRAM_MB": hg_vram,
         "Transformer_Tokens_Per_Sec": tf_speed,
-        "Transformer_Peak_VRAM_MB": tf_vram
+        "Transformer_VRAM_MB": tf_vram
     }
     
     with open("results.json", "w") as f:

@@ -9,6 +9,7 @@ import time
 import json
 import math
 from hgdm_ultimate import HGDMUltimate, HGDMConfig
+from utils import get_gpu_memory_usage
 
 def generate_math_problem():
     """Generates a synthetic algebraic equation string."""
@@ -59,15 +60,13 @@ def train_math_transfer(steps=500, seq_len=128):
         
         if step % 50 == 0:
             bpb = loss.item() / math.log(2)
-            peak_mem = torch.cuda.max_memory_allocated() / (1024**2)
-            current_mem = torch.cuda.memory_allocated() / (1024**2)
+            sys_mem = get_gpu_memory_usage()
             elapsed = time.time() - t_start
-            print(f"Step {step:4d} | Math BPB: {bpb:.4f} | Cur VRAM: {current_mem:.0f}MB | Peak: {peak_mem:.0f}MB | Time: {elapsed:.1f}s")
+            print(f"Step {step:4d} | Math BPB: {bpb:.4f} | VRAM: {sys_mem:.0f}MB | Time: {elapsed:.1f}s")
             history.append({
                 "step": step,
                 "bpb": bpb,
-                "current_mem_mb": current_mem,
-                "peak_mem_mb": peak_mem,
+                "vram_mb": sys_mem,
                 "time_s": elapsed
             })
 
@@ -81,13 +80,14 @@ def train_math_transfer(steps=500, seq_len=128):
     
     gen_text = bytes(output_tensor.cpu().tolist()).decode('utf-8', errors='ignore')
     print(f"Generated Result: {gen_text}")
+    sys_mem = get_gpu_memory_usage()
     
     results = {
         "training": history,
         "inference": {
             "prompt": "Solve for x: 10x + 5 = 105. Answer: ",
             "generation": gen_text,
-            "peak_mem_mb": torch.cuda.max_memory_allocated() / (1024**2)
+            "vram_mb": sys_mem
         }
     }
     
