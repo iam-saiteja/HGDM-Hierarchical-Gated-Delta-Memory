@@ -1,0 +1,37 @@
+# Datasets and Checkpoints
+data/
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+*.zip
+
+# Documents (Exclude all markdown except README.md)
+*.md
+!README.md
+*.pdf
+*.doc
+*.docx
+*.txt
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Logs and specific output files
+logs/
+tensorboard/
+*.log

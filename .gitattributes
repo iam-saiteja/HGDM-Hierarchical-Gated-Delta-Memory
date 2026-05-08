@@ -1,0 +1,2 @@
+# Large model files are not tracked due to GitHub 100MB limit
+# *.pt filter=lfs diff=lfs merge=lfs -text
