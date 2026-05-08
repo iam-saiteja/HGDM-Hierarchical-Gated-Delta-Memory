@@ -116,8 +116,8 @@ if __name__ == "__main__":
     model = HGDMUltimate(config).to(device)
     
     datasets = {
-        "Audio (WAV)": generate_audio_bytes(),
-        "Image (BMP)": generate_image_bytes(),
+        "Audio (PCM)": generate_audio_bytes(),
+        "Image (Raw RGB)": generate_image_bytes(),
         "Video (Raw Frames)": generate_video_bytes()
     }
     
