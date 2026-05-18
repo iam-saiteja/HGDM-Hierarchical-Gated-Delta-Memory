@@ -187,7 +187,7 @@ Olshausen and Field \cite{olshausen1996sparse} showed that the objective
   \min_{a,\Phi}\;\frac{1}{2}\|y - \Phi a\|_2^2 + \lambda\|a\|_1
 \end{equation}
 learns basis functions matching V1 simple cells when applied to natural images.
-Its solution via ISTA \cite{beck2009fast} gives the soft-threshold operator
+Its solution via ISTA \cite{beck2009ista} gives the soft-threshold operator
 $\Sc_\lambda(x)_i = \mathrm{sign}(x_i)\max(|x_i|-\lambda,0)$, converging at
 rate $O(1/t)$ to the global minimum. Vinje and Gallant
 \cite{vinje2000sparse} measured that approximately 5\% to 15\% of V1 neurons are active
@@ -792,9 +792,8 @@ H.\ Huang, Y.\ LeCun, and R.\ Balestriero.
 \newblock {LLM-JEPA}: Large language models meet joint embedding predictive
 architectures.
 \newblock \emph{arXiv preprint arXiv:2509.14252}, 2025.
-\newblock [Verify publication status before final submission.]
 
-\bibitem{beck2009fast}
+\bibitem{beck2009ista}
 A.\ Beck and M.\ Teboulle.
 \newblock A fast iterative shrinkage-thresholding algorithm for linear inverse
 problems.
@@ -887,13 +886,10 @@ modeling.
 2024.
 
 \bibitem{evabyte2025}
-L.\ Zheng, X.\ Zhao, G.\ Wang, C.\ Wu, D.\ Dong, A.\ Wang, M.\ Wang,
-Y.\ Du, H.\ Bo, A.\ Sharma, B.\ Li, K.\ Zhang, C.\ Hu, U.\ Thakker, and
-L.\ Kong.
-\newblock EvaByte: Efficient byte-level language models at scale.
-\newblock Technical report, HKU NLP, 2025.
-\newblock \emph{arXiv preprint arXiv:2505.XXXXX} [replace with confirmed arXiv ID].
-\newblock \url{https://hkunlp.github.io/blog/2025/evabyte}.
+OpenEvaByte.
+\newblock {EvaByte}: Efficient byte-level language models at scale.
+\newblock GitHub Repository, 2025.
+\newblock \url{https://github.com/hkunlp/OpenEvaByte}.
 
 \bibitem{schlag2021linear}
 I.\ Schlag, K.\ Irie, and J.\ Schmidhuber.
