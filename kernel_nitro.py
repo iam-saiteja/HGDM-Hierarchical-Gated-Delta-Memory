@@ -14,6 +14,10 @@ Corrections from v8:
      arguments. All previously hardcoded 64/32/31 literals are replaced with these
      symbols, allowing the kernel to be compiled at any valid power-of-2 size
      (e.g. D_K=32, D_V=32, CHUNK_SIZE=16) without modifying kernel source.
+Corrections from v9:
+  7. Cross-segment recurrent gradient backpropagation — backward pass now accepts
+     dstate (gradient with respect to final state S) and propagates it back to
+     dinitial_state (gradient with respect to initial state S_prev).
 """
 import torch
 import triton
@@ -134,16 +138,21 @@ def _chunk_fwd_kernel(
 def _chunk_bwd_kernel(
     Q, K, V, Alpha, Beta, State, Dout,
     DQ, DK, DV, DAlpha, DBeta,
+    Dstate, Dinitial_state,            # FIX 7: Cross-segment recurrent state gradients
     seq_len,
     D_K: tl.constexpr,                 # FIX 6
     D_V: tl.constexpr,                 # FIX 6
     CHUNK_SIZE: tl.constexpr,          # FIX 6
+    HAS_DSTATE: tl.constexpr,         # FIX 7: dstate presence
+    HAS_DINITIAL_STATE: tl.constexpr, # FIX 7: dinitial_state presence
     stride_qb, stride_qh, stride_qt, stride_qd,
     stride_kb, stride_kh, stride_kt, stride_kd,  # FIX 5: independent K strides
     stride_vb, stride_vh, stride_vt, stride_vd,
     stride_ab, stride_ah, stride_at,
     stride_bb, stride_bh, stride_bt,
     stride_sb, stride_sh, stride_sc, stride_sk, stride_sv,
+    stride_dsb, stride_dsh, stride_dsk, stride_dsv,       # FIX 7
+    stride_disb, stride_dish, stride_disk, stride_disv,   # FIX 7
 ):
     batch_idx = tl.program_id(0)
     head_idx  = tl.program_id(1)
@@ -164,7 +173,15 @@ def _chunk_bwd_kernel(
     offs_v = tl.arange(0, D_V)        # FIX 6
     offs_t = tl.arange(0, CHUNK_SIZE) # FIX 6
 
-    dS         = tl.zeros((D_K, D_V), dtype=tl.float32)  # FIX 6
+    # FIX 7: Initialize dS from dstate (if provided), otherwise from zeros
+    if HAS_DSTATE:
+        dstate_ptr = Dstate + batch_idx * stride_dsb + head_idx * stride_dsh
+        dS = tl.load(
+            dstate_ptr + offs_k[:, None] * stride_dsk + offs_v[None, :] * stride_dsv
+        ).to(tl.float32)
+    else:
+        dS = tl.zeros((D_K, D_V), dtype=tl.float32)  # FIX 6
+
     num_chunks = tl.cdiv(seq_len, CHUNK_SIZE)              # FIX 6
 
     for chunk_idx in range(num_chunks - 1, -1, -1):
@@ -276,6 +293,15 @@ def _chunk_bwd_kernel(
 
         dS = dS_prev
 
+    # FIX 7: Store the final dS into dinitial_state (which is the gradient for sequence's initial state)
+    if HAS_DINITIAL_STATE:
+        di_ptr = Dinitial_state + batch_idx * stride_disb + head_idx * stride_dish
+        tl.store(
+            di_ptr + offs_k[:, None] * stride_disk + offs_v[None, :] * stride_disv,
+            dS,
+            mask=(offs_k[:, None] < D_K) & (offs_v[None, :] < D_V)
+        )
+
 
 # ──────────────────────────────────────────────────────────────────
 # AUTOGRAD WRAPPER
@@ -336,6 +362,7 @@ class FusedNitroEngine(torch.autograd.Function):
         ctx.save_for_backward(q_s, k_s, v_s, a_s, b_s, states)
         ctx.dtype      = dtype
         ctx.chunk_size = chunk_size
+        ctx.has_init   = has_init                      # FIX 7
         return out.transpose(1, 2).to(dtype).contiguous(), states[:, :, -1].to(dtype)
 
     @staticmethod
@@ -345,6 +372,7 @@ class FusedNitroEngine(torch.autograd.Function):
         dk = q_s.shape[3]
         dv = v_s.shape[3]
         chunk_size = ctx.chunk_size
+        has_init = ctx.has_init
 
         dout_s = dout.transpose(1, 2).contiguous().float()
         dq = torch.empty_like(q_s)
@@ -353,17 +381,39 @@ class FusedNitroEngine(torch.autograd.Function):
         da = torch.empty_like(a_s)
         db = torch.empty_like(b_s)
 
+        # FIX 7: Handle dstate parameter (gradient from the future segment)
+        has_dstate = dstate is not None
+        if has_dstate:
+            dstate_s = dstate.float().contiguous()
+            ds_strides = dstate_s.stride()
+        else:
+            dstate_s = torch.empty(0, device=dout.device, dtype=torch.float32)
+            ds_strides = (0, 0, 0, 0)
+
+        # FIX 7: Handle dinitial_state calculation (gradient for initial state)
+        if has_init:
+            dinitial_state = torch.empty((B, H, dk, dv), device=dout.device, dtype=torch.float32).contiguous()
+            dis_strides = dinitial_state.stride()
+        else:
+            dinitial_state = torch.empty(0, device=dout.device, dtype=torch.float32)
+            dis_strides = (0, 0, 0, 0)
+
         grid = (B, H)
         _chunk_bwd_kernel[grid](
             q_s, k_s, v_s, a_s, b_s, states, dout_s,
-            dq, dk_, dv_, da, db, T,
+            dq, dk_, dv_, da, db,
+            dstate_s, dinitial_state,          # FIX 7
+            T,
             dk, dv, chunk_size,                # FIX 6: D_K, D_V, CHUNK_SIZE constexprs
+            has_dstate, has_init,              # FIX 7
             q_s.stride(0), q_s.stride(1), q_s.stride(2), q_s.stride(3),
             k_s.stride(0), k_s.stride(1), k_s.stride(2), k_s.stride(3),  # FIX 5: K strides
             v_s.stride(0), v_s.stride(1), v_s.stride(2), v_s.stride(3),
             a_s.stride(0), a_s.stride(1), a_s.stride(2),
             b_s.stride(0), b_s.stride(1), b_s.stride(2),
             states.stride(0), states.stride(1), states.stride(2), states.stride(3), states.stride(4),
+            ds_strides[0], ds_strides[1], ds_strides[2], ds_strides[3],       # FIX 7
+            dis_strides[0], dis_strides[1], dis_strides[2], dis_strides[3],   # FIX 7
             num_warps=4,
             num_stages=2,
         )
@@ -375,7 +425,7 @@ class FusedNitroEngine(torch.autograd.Function):
             dv_.transpose(1,2).to(dtype),
             da.transpose(1,2).to(dtype),
             db.transpose(1,2).to(dtype),
-            None,   # dstate
+            dinitial_state.to(dtype) if has_init else None,  # FIX 7: return dinitial_state
             None,   # chunk_size has no gradient
         )
 
