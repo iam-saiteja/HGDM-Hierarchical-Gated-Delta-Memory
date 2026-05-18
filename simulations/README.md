@@ -1,6 +1,6 @@
 # HGDM Experimental Suite
 
-This folder contains the 7 absolute core experiments designed to mathematically and empirically prove the superiority of the HGDM architecture over standard Transformers on an RTX 3090 Ti.
+This folder contains the 11 absolute core experiments designed to mathematically and empirically prove the superiority of the HGDM architecture over standard Transformers on an RTX 3090 Ti.
 
 Each experiment is organized into its own folder for clean result management.
 
@@ -42,6 +42,26 @@ Each experiment is organized into its own folder for clean result management.
 *   `run_exp.py`: Trains from scratch on raw PCM (Audio), Raw RGB (Image), and Raw Frames (Video).
 *   `plot_results.py`: Renders the raw byte hallucinations into a PNG figure.
 *   Outputs: `results.json`, `generated_audio.raw`, `generated_image.raw`, `generated_video.raw`, `hallucination_proof.png`.
+
+### `exp8_kernel_impact/`
+**Goal**: The Nitro Engine Speedup Proof.
+*   `run_exp.py`: Benchmarks the custom Triton Fused Kernel vs. a standard sequential PyTorch implementation.
+*   Outputs: `results.json`.
+
+### `exp9_long_gating/`
+**Goal**: Long-Range Dependency Isolation Proof.
+*   `run_exp.py`: Trains Full vs. Flat variants at 4096 context length to prove multi-scale advantage over distance.
+*   Outputs: `results.json`.
+
+### `exp10_state_stability/`
+**Goal**: The Mathematical Recurrent Stability Proof.
+*   `run_exp.py`: Auto-regressively generates 100,000 tokens while measuring the Frobenius norm of the state to prove it does not explode/vanish.
+*   Outputs: `results.json`.
+
+### `exp11_passkey_retrieval/`
+**Goal**: The Effective Context Window Proof (Needle in a Haystack).
+*   `run_exp.py`: Runs a curriculum training and evaluation loop on the "Passkey Retrieval" task up to 16,384 tokens to prove exact retrieval across extreme depths.
+*   Outputs: `results.json`.
 
 ---
 
