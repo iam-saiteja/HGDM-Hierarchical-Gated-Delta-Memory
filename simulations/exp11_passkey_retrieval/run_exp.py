@@ -22,7 +22,7 @@ def generate_passkey_data(batch_size, seq_len, depth, device):
     keys = []
     
     for _ in range(batch_size):
-        passkey = f"{random.randint(10000, 99999)}"
+        passkey = f"{random.randint(0, 9)}"
         keys.append(passkey)
         passkey_str = f" The passkey is {passkey}. "
         prompt_str = f" What is the passkey? {passkey}"
@@ -101,8 +101,8 @@ def train_passkey_curriculum():
                 logits, _ = model(x)
                 loss_all = nn.CrossEntropyLoss(reduction='none')(logits.view(-1, 256), y.view(-1)).view(2, -1)
                 
-                # Focus 100% of the network's capacity on the retrieval task
-                loss_passkey = loss_all[:, -5:].mean()
+                # Focus 100% of the network's capacity on the retrieval task (last token)
+                loss_passkey = loss_all[:, -1:].mean()
                 loss = loss_passkey
                 
             scaler.scale(loss).backward()
@@ -125,14 +125,10 @@ def train_passkey_curriculum():
             gen = x
             next_byte = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
             gen = torch.cat([gen, next_byte], dim=1)
-            for _ in range(4):
-                logits, states = model(next_byte, states)
-                next_byte = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-                gen = torch.cat([gen, next_byte], dim=1)
     
     print("\n[Diagnostic] Checking if model learned the format:")
     print(f"Target Passkey: {target_key}")
-    print("Generated:     ", bytes(gen[0, -5:].tolist()).decode(errors='replace'))
+    print("Generated:     ", bytes(gen[0, -1:].tolist()).decode(errors='replace'))
     
     return model
 
@@ -175,13 +171,8 @@ def evaluate_context_window(model):
                         logits, states = model(prompt_tensor)
                         next_byte = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
                         generated = torch.cat([generated, next_byte], dim=1)
-                        for _ in range(4):
-                            logits, next_states = model(next_byte, states)
-                            states = next_states
-                            next_byte = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-                            generated = torch.cat([generated, next_byte], dim=1)
                         
-                gen_bytes = generated[0, -5:].cpu().numpy().tolist()
+                gen_bytes = generated[0, -1:].cpu().numpy().tolist()
                 try:
                     gen_str = bytes(gen_bytes).decode('utf-8')
                 except:
