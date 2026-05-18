@@ -1,0 +1,5 @@
+{
+    "benchmark_forward_backward_ms": 7.47988224029541,
+    "stuffed_mamba_max_divergence": 0.015625,
+    "status": "PASS"
+}

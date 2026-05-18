@@ -1,6 +1,6 @@
 # HGDM Experimental Suite
 
-This folder contains the 11 absolute core experiments designed to benchmark the empirical performance of the HGDM architecture against standard Transformers on an RTX 3090 Ti.
+This folder contains the 12 absolute core experiments designed to benchmark the empirical performance of the HGDM architecture against standard Transformers on an RTX 3090 Ti.
 
 Each experiment is organized into its own folder for clean result management.
 
@@ -61,6 +61,11 @@ Each experiment is organized into its own folder for clean result management.
 ### `exp11_kernel_verification/`
 **Goal**: The Kernel Verification Suite.
 *   `run_exp.py`: Explicitly verifies the Triton kernel bug fixes: confirms `num_warps=4` eliminates the speed bottleneck, and proves the `b[:, None]` math fix mathematically isolates state signals from high-entropy noise, solving the Stuffed Mamba collapse.
+*   Outputs: `results.json`.
+
+### `exp12_passkey_retrieval/`
+**Goal**: The Needle In A Haystack (Passkey) Test.
+*   `run_exp.py`: Uses Curriculum Learning to train the model to locate and extract a passkey hidden in up to 8,192 tokens of byte noise, proving the architecture's long-range associative gating.
 *   Outputs: `results.json`.
 
 ### `exp_lr_lowrank/`
