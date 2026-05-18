@@ -381,7 +381,7 @@ All experiments were conducted on a single NVIDIA RTX 3090 Ti (24 GB). Models 
 
 **Setup:** 
 1. Benchmarked forward/backward execution time over 10 iterations of a large sequence (T=8192).
-2. Mathematically proved the write-gate `b[:, None]` bug fix by injecting a passkey signal followed by 4000 high-entropy noise tokens with closed gates ($\beta=0$).
+2. Empirically validated the write-gate `b[:, None]` bug fix by injecting a passkey signal followed by 4000 high-entropy noise tokens with closed gates ($\beta=0$).
 
 **Validation:**
 - **Speed:** In our microbenchmarks the `num_warps=4` Ampere configuration reduced a prior bottleneck and improved per-chunk throughput. Results depend on GPU microarchitecture and kernel parameters; see `simulations/exp11_kernel_verification` for measured numbers.
@@ -498,7 +498,7 @@ HTSPC-H3/
 │   ├── exp8_kernel_impact/   # Fused vs sequential
 │   ├── exp9_long_gating/     # Long gating at 4096
 │   ├── exp10_state_stability/ # 100k token stress test
-│   ├── exp11_kernel_verification/ # Triton kernel correctness + speed proof
+│   ├── exp11_kernel_verification/ # Triton kernel correctness + speed verification
 │   ├── exp12_passkey_retrieval/   # Needle-in-haystack: 100% at 32K tokens
 │   ├── exp13_architectural_advancements/ # Continuous-Time Gating & State Highway comparison
 │   └── utils.py               # Helpers (Transformer baseline, GPU monitoring)

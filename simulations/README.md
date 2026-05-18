@@ -1,6 +1,6 @@
 # HGDM Experimental Suite
 
-This folder contains the 12 absolute core experiments designed to benchmark the empirical performance of the HGDM architecture against standard Transformers on an RTX 3090 Ti.
+This folder contains the 14 experiments (13 core benchmarking suites and 1 low-rank state compression prototype) designed to benchmark the empirical performance of the HGDM architecture against standard Transformers on an RTX 3090 Ti.
 
 Each experiment is organized into its own folder for clean result management.
 
