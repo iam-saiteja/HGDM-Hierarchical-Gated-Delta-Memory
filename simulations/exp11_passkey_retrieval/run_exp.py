@@ -56,7 +56,13 @@ def train_passkey_curriculum():
     checkpoint_path = "../exp1_enwik8/hgdm_enwik8_120M.pt"
     if os.path.exists(checkpoint_path):
         print(f"Loading base Enwik8 checkpoint from {checkpoint_path}...")
-        model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
+        state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
+        # Handle older checkpoint naming conventions
+        if "byte_emb.weight" in state_dict:
+            state_dict["embedding.weight"] = state_dict.pop("byte_emb.weight")
+        if "head.weight" in state_dict:
+            state_dict["fc_out.weight"] = state_dict.pop("head.weight")
+        model.load_state_dict(state_dict, strict=False)
     else:
         print("WARNING: Checkpoint not found. Training from scratch will fail to learn retrieval.")
     
