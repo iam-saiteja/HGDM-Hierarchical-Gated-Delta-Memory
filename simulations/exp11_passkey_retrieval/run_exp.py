@@ -56,12 +56,12 @@ def train_passkey_curriculum():
     
     print(f"\n{'='*50}\nExp 11: Passkey Retrieval (Context Window Test)\n{'='*50}")
     
-    # Fast curriculum to teach the task format
+    # Extended curriculum to ensure convergence from scratch
     curriculum = [
-        (512, 100),
-        (1024, 100),
-        (2048, 100),
-        (4096, 100)
+        (512, 800),
+        (1024, 400),
+        (2048, 400),
+        (4096, 400)
     ]
     
     t_start = time.time()
@@ -77,16 +77,15 @@ def train_passkey_curriculum():
                 logits, _ = model(x)
                 loss_all = nn.CrossEntropyLoss(reduction='none')(logits.view(-1, 256), y.view(-1)).view(2, -1)
                 
-                # Heavily weight the loss on the final 5 tokens (the passkey answer)
+                # Focus 100% of the network's capacity on the retrieval task
                 loss_passkey = loss_all[:, -5:].mean()
-                loss_noise = loss_all[:, :-5].mean()
-                loss = loss_noise * 0.1 + loss_passkey * 2.0
+                loss = loss_passkey
                 
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
             
-            if step % 25 == 0:
+            if step % 100 == 0:
                 print(f"Step {step:3d} | Loss Passkey: {loss_passkey.item():.4f} | VRAM: {get_gpu_memory_usage():.0f}MB")
                 
     print(f"\nCurriculum Training Complete in {time.time() - t_start:.1f}s")
@@ -145,6 +144,9 @@ def evaluate_context_window(model):
                     
                 if gen_str == passkey:
                     successes += 1
+                elif _ == 0:
+                    # Print the first failure of each depth for debugging
+                    print(f"    [Debug] L={L}, Depth={depth} | Target: {passkey} | Generated: {gen_str}")
                     
             acc = successes / trials
             print(f"L={L:5d} | Depth={depth:.1f} | Accuracy: {acc*100:3.0f}% | VRAM: {get_gpu_memory_usage():.0f}MB")
