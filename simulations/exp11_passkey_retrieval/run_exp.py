@@ -19,9 +19,11 @@ def generate_passkey_data(batch_size, seq_len, depth, device):
     """
     x_batch = []
     y_batch = []
+    keys = []
     
     for _ in range(batch_size):
         passkey = f"{random.randint(10000, 99999)}"
+        keys.append(passkey)
         passkey_str = f" The passkey is {passkey}. "
         prompt_str = f" What is the passkey? {passkey}"
         
@@ -44,12 +46,19 @@ def generate_passkey_data(batch_size, seq_len, depth, device):
     x = torch.stack(x_batch).long().to(device)
     y = torch.stack(y_batch).long().to(device)
     
-    return x, y
+    return x, y, keys
 
 def train_passkey_curriculum():
     device = torch.device('cuda')
     config = HGDMConfig(d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256)
     model = HGDMUltimate(config).to(device)
+    
+    checkpoint_path = "../exp1_enwik8/hgdm_enwik8_120M.pt"
+    if os.path.exists(checkpoint_path):
+        print(f"Loading base Enwik8 checkpoint from {checkpoint_path}...")
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
+    else:
+        print("WARNING: Checkpoint not found. Training from scratch will fail to learn retrieval.")
     
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
     scaler = torch.amp.GradScaler('cuda')
@@ -74,7 +83,7 @@ def train_passkey_curriculum():
                 g['lr'] = 3e-4
         for step in range(steps):
             depth = random.uniform(0.1, 0.9)
-            x, y = generate_passkey_data(2, seq_len, depth, device)
+            x, y, _ = generate_passkey_data(2, seq_len, depth, device)
             
             opt.zero_grad()
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
@@ -96,7 +105,9 @@ def train_passkey_curriculum():
     
     # After training, quick diagnostic test
     model.eval()
-    x, _ = generate_passkey_data(1, 512, 0.5, device)
+    x, _, keys = generate_passkey_data(1, 512, 0.5, device)
+    target_key = keys[0]
+    
     with torch.no_grad():
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             logits, states = model(x)
@@ -109,7 +120,8 @@ def train_passkey_curriculum():
                 gen = torch.cat([gen, next_byte], dim=1)
     
     print("\n[Diagnostic] Checking if model learned the format:")
-    print("Generated:", bytes(gen[0, -5:].tolist()).decode(errors='replace'))
+    print(f"Target Passkey: {target_key}")
+    print("Generated:     ", bytes(gen[0, -5:].tolist()).decode(errors='replace'))
     
     return model
 
