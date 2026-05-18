@@ -1,6 +1,6 @@
 # HGDM Experimental Suite
 
-This folder contains the 11 absolute core experiments designed to mathematically and empirically prove the superiority of the HGDM architecture over standard Transformers on an RTX 3090 Ti.
+This folder contains the 10 absolute core experiments designed to mathematically and empirically prove the superiority of the HGDM architecture over standard Transformers on an RTX 3090 Ti.
 
 Each experiment is organized into its own folder for clean result management.
 
@@ -58,11 +58,12 @@ Each experiment is organized into its own folder for clean result management.
 *   `run_exp.py`: Auto-regressively generates 100,000 tokens while measuring the Frobenius norm of the state to prove it does not explode/vanish.
 *   Outputs: `results.json`.
 
-### Exp 11: Passkey Retrieval & State Collapse (The Stuffed Mamba Phenomenon)
-- **Goal**: Evaluate the effective context window via synthetic single-byte retrieval.
-- **Method**: Curriculum training from 512 to 16,384 sequence lengths using the pre-trained Enwik8 gating mechanisms.
-- **Result (The Stuffed Mamba Limitation)**: While HGDM successfully maintains physical state stability over 100k tokens (Exp 10), it suffers from the identical *state collapse* phenomenon documented in recent SSM literature (e.g., *Stuffed Mamba*, 2024). Because the outer-product state updates write blindly across the memory matrix, high-entropy uniform noise gradually overwrites the passkey signal. Without absolute positional embeddings or multi-day extensive forgetting curriculums, pure linear associative memories struggle with synthetic retrieval over extreme distances. This confirms HGDM's theoretical isomorphism to Mamba-class architectures in both strengths (O(1) inference) and boundaries (state interference).
-*   Outputs: `results.json`.
+## Limitations & Future Work
+
+### State Collapse (The Stuffed Mamba Phenomenon)
+We attempted to train HGDM on a Passkey Retrieval task and observed the identical *state collapse* phenomenon documented for Mamba (*Stuffed Mamba*, 2024). Under heavy interference (e.g., thousands of uniform random bytes), the model's state is overwritten before the retrieval query. Because the outer-product state updates write blindly across the memory matrix, high-entropy uniform noise gradually overwrites specific signals. 
+
+This limitation is not unique to HGDM but is mathematically inherent to the write‑over‑everything property of outer‑product state updates without absolute positional embeddings or extensive forgetting curriculums. However, because HGDM’s memory complexity is strictly $O(N)$ with a tiny constant, extending the training context or increasing state capacity to mitigate this effect is entirely feasible on a single GPU—a path that remains prohibitively expensive for Transformers. We leave these investigations to future work.
 
 ---
 
