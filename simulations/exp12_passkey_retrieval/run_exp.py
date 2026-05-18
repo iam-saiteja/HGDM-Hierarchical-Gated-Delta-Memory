@@ -13,18 +13,16 @@ from hgdm_ultimate import HGDMUltimate, HGDMConfig
 def generate_passkey_batch(batch_size, seq_len, device):
     """
     Generates a batch of noise with a hidden passkey.
-    Format: [noise] The passkey is X. [noise] The passkey is X
-    Where X is a single digit 0-9.
+    Uses dense masked supervision so the model learns the prompt bytes.
     """
-    # Create random lowercase letters as noise
     x = torch.randint(97, 122, (batch_size, seq_len), device=device, dtype=torch.long)
-    y = x.clone() # We only care about the final prediction, but we need y for cross entropy
+    y = torch.zeros_like(x)
+    loss_mask = torch.zeros_like(x, dtype=torch.float32)
     
     for b in range(batch_size):
         passkey = str(random.randint(0, 9))
-        passkey_byte = ord(passkey)
         
-        # Insert the passkey randomly in the first half of the sequence
+        # 1. First Prompt
         prompt_1 = "The passkey is " + passkey + ". "
         p1_bytes = [ord(c) for c in prompt_1]
         
@@ -34,22 +32,27 @@ def generate_passkey_batch(batch_size, seq_len, device):
         
         x[b, insert_idx:insert_idx+len(p1_bytes)] = torch.tensor(p1_bytes, device=device)
         
-        # Insert the question at the very end
+        for t in range(len(p1_bytes)-1):
+            y[b, insert_idx + t] = p1_bytes[t+1]
+            loss_mask[b, insert_idx + t] = 1.0
+            
+        # 2. Second Prompt (Question)
         prompt_2 = "What is the passkey? "
         p2_bytes = [ord(c) for c in prompt_2]
         
-        # The sequence ends with the prompt, the target y ends with the passkey
         start_q = seq_len - len(p2_bytes)
-        
         x[b, start_q:seq_len] = torch.tensor(p2_bytes, device=device)
         
-        # The target at the very last position should be the passkey byte
-        y[b, -1] = passkey_byte
+        for t in range(len(p2_bytes)-1):
+            y[b, start_q + t] = p2_bytes[t+1]
+            loss_mask[b, start_q + t] = 1.0
+            
+        # 3. Final Answer
+        # The last token of x predicts the passkey byte
+        y[b, -1] = ord(passkey)
+        loss_mask[b, -1] = 5.0 # Boost weight for the actual needle retrieval
         
-        # To avoid penalizing noise predictions, we can use a loss mask later,
-        # but for simplicity we will just compute CE on the last token.
-        
-    return x, y
+    return x, y, loss_mask
 
 def train_curriculum(model, opt, device):
     print("="*60)
@@ -78,14 +81,14 @@ def train_curriculum(model, opt, device):
         for step in range(steps):
             opt.zero_grad(set_to_none=True)
             
-            x, y = generate_passkey_batch(4 if seq_len <= 1024 else 1, seq_len, device)
+            x, y, loss_mask = generate_passkey_batch(8 if seq_len <= 1024 else 2, seq_len, device)
             
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 logits = model(x)[0]
-                # We only calculate loss on the final token prediction
-                last_logits = logits[:, -1, :] # (B, vocab_size)
-                last_targets = y[:, -1]        # (B,)
-                loss = F.cross_entropy(last_logits, last_targets)
+                
+                # Dense masked sequence loss
+                ce_loss = F.cross_entropy(logits.view(-1, 256), y.view(-1), reduction='none')
+                loss = (ce_loss * loss_mask.view(-1)).sum() / loss_mask.sum()
             
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
@@ -94,9 +97,10 @@ def train_curriculum(model, opt, device):
             scaler.update()
             
             if step % 100 == 0:
-                pred = last_logits.argmax(dim=-1)
-                acc = (pred == last_targets).float().mean().item() * 100
-                print(f"Step {step:4d} | Loss: {loss.item():.4f} | Accuracy: {acc:5.1f}%")
+                # Accuracy on just the needle prediction
+                pred = logits[:, -1, :].argmax(dim=-1)
+                acc = (pred == y[:, -1]).float().mean().item() * 100
+                print(f"Step {step:4d} | Dense Loss: {loss.item():.4f} | Needle Accuracy: {acc:5.1f}%")
                 
         print(f"Phase Complete in {time.time()-t0:.1f}s")
         
@@ -153,9 +157,9 @@ def evaluate_grid(model, device):
 def run_experiment():
     device = torch.device('cuda')
     config = HGDMConfig(
-        d_model=768,
-        n_layers=6, # Smaller model for rapid testing
-        n_heads=12,
+        d_model=384,
+        n_layers=4, # Tiny model (10M params) for ultra-fast convergence on reasoning tasks
+        n_heads=6,
         vocab_size=256
     )
     model = HGDMUltimate(config).to(device)
