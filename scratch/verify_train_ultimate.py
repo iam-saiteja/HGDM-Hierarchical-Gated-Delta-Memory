@@ -20,11 +20,14 @@ def run_test():
         vocab_size=256,
     )
     model = HGDMUltimate(cfg, force_sequential=True)
+    from train_ultimate import TransformerTied
+    tied_model = TransformerTied(d_model=128, n_layers=2, n_heads=4, d_ff=256, vocab_size=256, max_seq_len=64)
     data = tiny_dataset()
-    # Very short training to verify that the warm‑up scheduler and training loop run without errors
+    
+    # Very short training for HGDM
     history, total_time = train_model(
         model=model,
-        name="tiny_test",
+        name="tiny_test_hgdm",
         train_data=data,
         steps=10,
         micro_batch=1,
@@ -32,9 +35,20 @@ def run_test():
         seq_len=64,
         lr=1e-4,
     )
-    print("[SUCCESS] train_ultimate ran without errors.")
-    print(f"History length: {len(history)}")
-    print(f"Total time: {total_time:.2f}s")
+    
+    # Very short training for Tied Transformer
+    history_tied, total_time_tied = train_model(
+        model=tied_model,
+        name="tiny_test_tied_transformer",
+        train_data=data,
+        steps=10,
+        micro_batch=1,
+        accum_steps=2,
+        seq_len=64,
+        lr=1e-4,
+    )
+    print("[SUCCESS] train_ultimate ran both HGDM and Tied Transformer without errors.")
+    print(f"HGDM time: {total_time:.2f}s | Tied Transformer time: {total_time_tied:.2f}s")
 
 if __name__ == "__main__":
     run_test()

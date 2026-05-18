@@ -120,13 +120,88 @@ class TransformerLayer(nn.Module):
         return x, new_cache
 
 class TransformerBaseline(nn.Module):
-    def __init__(self, d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256, max_seq_len=20000):
+    def __init__(self, d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256, max_seq_len=2048):
         super().__init__()
         self.byte_emb = nn.Embedding(vocab_size, d_model)
         self.pos_emb = nn.Embedding(max_seq_len, d_model)
         self.layers = nn.ModuleList([TransformerLayer(d_model, n_heads, d_ff) for _ in range(n_layers)])
         self.norm_f = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, vocab_size)
+
+    def forward(self, x, kv_caches=None):
+        B, T = x.shape
+        if kv_caches is None:
+            pos = torch.arange(0, T, device=x.device).unsqueeze(0)
+        else:
+            past_seq_len = kv_caches[0][0].shape[2]
+            pos = torch.arange(past_seq_len, past_seq_len + T, device=x.device).unsqueeze(0)
+            
+        x = self.byte_emb(x) + self.pos_emb(pos)
+        
+        new_caches = []
+        for i, layer in enumerate(self.layers):
+            cache_i = kv_caches[i] if kv_caches is not None else None
+            x, nc = layer(x, cache_i)
+            new_caches.append(nc)
+            
+        return self.head(self.norm_f(x)), new_caches
+
+    @torch.no_grad()
+    def generate(self, prompt, max_new_bytes=100, temp=0.8):
+        self.eval()
+        generated = prompt
+        logits, kv_caches = self.forward(prompt)
+        last_byte = prompt[:, -1:]
+        
+        for _ in range(max_new_bytes):
+            logits, kv_caches = self.forward(last_byte, kv_caches)
+            logits = logits[:, -1, :] / temp
+            probs = F.softmax(logits, dim=-1)
+            last_byte = torch.multinomial(probs, num_samples=1)
+            generated = torch.cat([generated, last_byte], dim=1)
+        return generated
+
+class RMSNorm(nn.Module):
+    def __init__(self, d, eps=1e-8):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(d))
+    def forward(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
+
+class SwiGLU(nn.Module):
+    def __init__(self, d_model: int, d_ff: int):
+        super().__init__()
+        self.w1 = nn.Linear(d_model, d_ff, bias=False)
+        self.w2 = nn.Linear(d_model, d_ff, bias=False)
+        self.w3 = nn.Linear(d_ff, d_model, bias=False)
+    def forward(self, x):
+        return self.w3(F.silu(self.w1(x)) * self.w2(x))
+
+class TransformerTiedLayer(nn.Module):
+    def __init__(self, d_model, n_heads, d_ff):
+        super().__init__()
+        self.norm1 = RMSNorm(d_model)
+        self.attn = KVCachedAttention(d_model, n_heads)
+        self.norm2 = RMSNorm(d_model)
+        self.mlp = SwiGLU(d_model, d_ff)
+
+    def forward(self, x, kv_cache=None):
+        nx = self.norm1(x)
+        a_out, new_cache = self.attn(nx, kv_cache)
+        x = x + a_out
+        x = x + self.mlp(self.norm2(x))
+        return x, new_cache
+
+class TransformerTied(nn.Module):
+    def __init__(self, d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256, max_seq_len=2048):
+        super().__init__()
+        self.byte_emb = nn.Embedding(vocab_size, d_model)
+        self.pos_emb = nn.Embedding(max_seq_len, d_model)
+        self.layers = nn.ModuleList([TransformerTiedLayer(d_model, n_heads, d_ff) for _ in range(n_layers)])
+        self.norm_f = RMSNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size, bias=False)
+        self.head.weight = self.byte_emb.weight
 
     def forward(self, x, kv_caches=None):
         B, T = x.shape
@@ -329,11 +404,17 @@ if __name__ == "__main__":
     
     # Matching Transformer Config (same width and depth)
     tf_model = TransformerBaseline(
-        d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256, max_seq_len=20000
+        d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256, max_seq_len=2048
+    ).to(device)
+
+    # Matching Tied Transformer Config (same width and depth with weight tying, SwiGLU, RMSNorm)
+    tf_tied_model = TransformerTied(
+        d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256, max_seq_len=2048
     ).to(device)
     
     print(f"\nHGDM Parameters: {sum(p.numel() for p in hgdm_model.parameters()) / 1e6:.2f} M")
     print(f"Transformer Parameters: {sum(p.numel() for p in tf_model.parameters()) / 1e6:.2f} M")
+    print(f"Transformer Tied Parameters: {sum(p.numel() for p in tf_tied_model.parameters()) / 1e6:.2f} M")
     
     tf_history, hgdm_history = [], []
     tf_time, hgdm_time = 0.0, 0.0
@@ -351,7 +432,20 @@ if __name__ == "__main__":
     else:
         print("Training Transformer...")
         tf_history, tf_time = train_model(tf_model, "Transformer", train_data)
+
+    # ---------------------------------------------------------
+    # 2b. TRAIN TIED TRANSFORMER
+    # ---------------------------------------------------------
+    if os.path.exists("transformer_tied_enwik8.pt"):
+        print("\nLoading existing Tied Transformer weights...")
+        tf_tied_model.load_state_dict(torch.load("transformer_tied_enwik8.pt", map_location=device, weights_only=True))
         
+    if args.only_hgdm:
+        print("Skipping Tied Transformer training (--only-hgdm is active).")
+    else:
+        print("Training Tied Transformer...")
+        _ = train_model(tf_tied_model, "TransformerTied", train_data)
+
     # ---------------------------------------------------------
     # 3. TRAIN HGDM
     # ---------------------------------------------------------

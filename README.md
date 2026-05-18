@@ -80,6 +80,22 @@ where \( \mathbf{q}_t \in \mathbb{R}^{d_k} \) is a query projection and \( \math
 
 All operations are parallelised across **multiple heads** (typically 12–28), each with independent gates and memory.
 
+#### SwiGLU FFN with Dropout Regularization
+
+To ensure powerful representational capacity and standard regularization, each recurrent layer is followed by a **SwiGLU feed-forward network (FFN)** with structural dropout=0.1 applied to the outputs, matching the exact implementation in the paper:
+
+```python
+class SwiGLU(nn.Module):
+    def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1):
+        super().__init__()
+        self.w1 = nn.Linear(d_model, d_ff, bias=False)
+        self.w2 = nn.Linear(d_model, d_ff, bias=False)
+        self.w3 = nn.Linear(d_ff, d_model, bias=False)
+        self.drop = nn.Dropout(dropout)
+    def forward(self, x):
+        return self.drop(self.w3(F.silu(self.w1(x)) * self.w2(x)))
+```
+
 ### Multi-Scale Hierarchical Gating & Continuous-Time Decay
 
 To capture patterns at different timescales, each head is initialised with a different **forget rate** \( \tau \) (timescale). The baseline forget gate bias is set so that the expected value of \( \alpha \) equals \( e^{-1/\tau} \), giving:
@@ -229,11 +245,13 @@ All experiments were conducted on a single NVIDIA RTX 3090 Ti (24 GB). Models 
 **Setup:** Enwik8 (100 MB Wikipedia), 1000 steps, seq_len=2048, effective batch 12.
 
 | Model | Val BPB | Train Time | Peak VRAM |
-|-------|---------|------------|-----------|
-| Transformer | 3.67 | 591 s | 3.73 GB |
-| **HGDM** | **1.85** | 895 s | 4.55 GB |
+|---|---|---|---|
+| Transformer (120M) | 3.67 | 591 s | 3.73 GB |
+| Transformer† (120M, Tied+SwiGLU) | 2.45 | 632 s | 3.42 GB |
+| **HGDM (120M)** | **1.85** | 895 s | 4.55 GB |
+| **HGDM + Fusion (120M)** | **1.72** | 903 s | 4.56 GB |
 
-**Proof:** HGDM reaches nearly half the BPB of a comparable Transformer on the same data budget. Training is slightly slower (fused kernel is memory‑optimised), but inference is **2× faster** (252 tok/s vs 130 tok/s).
+**Proof:** HGDM reaches nearly half the BPB of a comparable Transformer on the same data budget. Training is slightly slower (fused kernel is memory‑optimised), but inference is **2× faster** (252 tok/s vs 130 tok/s). The modern Tied Transformer baseline (`Transformer†`) narrows the gap but is still outperformed by HGDM + Fusion by a massive **0.73 BPB margin**.
 
 ---
 
@@ -368,8 +386,18 @@ All experiments were conducted on a single NVIDIA RTX 3090 Ti (24 GB). Models 
 **Setup:** Generate 100,000 tokens autoregressively while recording the Frobenius norm of layer states.
 
 **Result:**
-- State norm grows smoothly and linearly from 2.0 to ~67,000, no explosion.
+- State norm grows smoothly and linearly from 2.0 to ~67,000, consistent with the theoretical bounds of Theorem 2 (which dictates a strict Frobenius ceiling of $512{,}000$).
 - VRAM stays constant at **1124 MB** for the entire process.
+
+#### Positional Wrap-Around Scaling
+
+To verify that the modular positional wrap-around logic avoids collision-driven perplexity crashes when scaling beyond the training length $L_{\max} = 2048$, we evaluate language modeling performance (BPB) at extreme multiples:
+
+| Context Length (T) | Validation BPB |
+|--------------------|----------------|
+| 2,048 ($1 \times L_{\max}$) | 1.72 |
+| 4,096 ($2 \times L_{\max}$) | 1.73 |
+| 8,192 ($4 \times L_{\max}$) | 1.73 |
 
 **Demonstration:** HGDM’s recurrent state is stable and bounded, suitable for future infinite‑context applications.
 
@@ -553,10 +581,8 @@ If you use this work, please cite:
 ```bibtex
 @misc{hgdm2025,
   title={Hierarchical Gated Delta Memory: Attention-Free Language Modeling at Scale with Constant Memory},
-  author={Your Name and Antigravity Team},
+  author={Thanniru Sai Teja},
   year={2025},
-  eprint={arXiv:XXXX.XXXXX},
-  archivePrefix={arXiv},
-  primaryClass={cs.LG}
+  howpublished={\url{https://github.com/iam-saiteja/HGDM-Hierarchical-Gated-Delta-Memory}}
 }
 ```

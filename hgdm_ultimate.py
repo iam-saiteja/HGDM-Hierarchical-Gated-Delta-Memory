@@ -34,13 +34,14 @@ class RMSNorm(nn.Module):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
 
 class SwiGLU(nn.Module):
-    def __init__(self, d_model: int, d_ff: int):
+    def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1):
         super().__init__()
         self.w1 = nn.Linear(d_model, d_ff, bias=False)
         self.w2 = nn.Linear(d_model, d_ff, bias=False)
         self.w3 = nn.Linear(d_ff, d_model, bias=False)
+        self.drop = nn.Dropout(dropout)
     def forward(self, x):
-        return self.w3(F.silu(self.w1(x)) * self.w2(x))
+        return self.drop(self.w3(F.silu(self.w1(x)) * self.w2(x)))
 
 class MultiHeadGatedDelta(nn.Module):
     def __init__(self, config: HGDMConfig, force_sequential=False):
