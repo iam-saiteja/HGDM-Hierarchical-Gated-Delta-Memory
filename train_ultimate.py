@@ -148,7 +148,7 @@ class TransformerBaseline(nn.Module):
 # PIPELINE FUNCTIONS
 # =============================================================================
 def train_model(model, name, train_data, steps=1000, micro_batch=1, accum_steps=12, seq_len=2048, lr=4e-4):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda')
     model.to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
     

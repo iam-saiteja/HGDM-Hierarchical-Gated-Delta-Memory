@@ -280,7 +280,7 @@ All experiments were conducted on a single NVIDIA RTX 3090 Ti (24 GB). Models 
 
 ### Exp 8: Fused Kernel vs. Sequential Implementation
 
-**Goal:** Quantify the speedup provided by the custom Triton kernel.
+**Goal:** Quantify the speedup provided by the custom Triton kernel (toggled via the model-level `force_sequential=True` switch in `HGDMUltimate`).
 
 **Setup:** 120M model, inference forward pass (no grad), compared fused vs. sequential loop.
 
@@ -378,7 +378,7 @@ python run_exp.py
 ### State Collapse (The Stuffed Mamba Phenomenon)
 We attempted to train HGDM on a Passkey Retrieval task and observed the identical *state collapse* phenomenon documented for Mamba (*Stuffed Mamba*, 2024). Under heavy interference (e.g., thousands of uniform random bytes), the model's state is overwritten before the retrieval query. Because the outer-product state updates write blindly across the memory matrix, high-entropy uniform noise gradually overwrites specific signals. 
 
-This limitation is not unique to HGDM but is mathematically inherent to the write‑over‑everything property of outer‑product state updates without complex positional routing or convolutions (while HGDM includes a simple learned `pos_embedding`, it was zeroed out to evaluate pure associative gating). However, because HGDM’s memory complexity is strictly $O(N)$ with a tiny constant, extending the training context or increasing state capacity to mitigate this effect is entirely feasible on a single GPU—a path that remains prohibitively expensive for Transformers. We leave these investigations to future work.
+This limitation is not unique to HGDM but is mathematically inherent to the write‑over‑everything property of outer‑product state updates. Despite the architecture natively containing learned absolute positional embeddings, the linear gating mechanics still struggle to perfectly isolate scattered patterns across extreme distances. However, because HGDM’s memory complexity is strictly $O(N)$ with a tiny constant, extending the training context or increasing state capacity to mitigate this effect is entirely feasible on a single GPU—a path that remains prohibitively expensive for Transformers. We leave these investigations to future work.
 
 ---
 
