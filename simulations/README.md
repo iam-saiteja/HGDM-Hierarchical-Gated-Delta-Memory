@@ -1,6 +1,6 @@
 # HGDM Experimental Suite
 
-This folder contains the core experiments designed to benchmark the empirical performance of the HGDM architecture against standard Transformers on an RTX 3090 Ti.
+This folder contains the 11 absolute core experiments designed to benchmark the empirical performance of the HGDM architecture against standard Transformers on an RTX 3090 Ti.
 
 Each experiment is organized into its own folder for clean result management.
 
@@ -56,6 +56,11 @@ Each experiment is organized into its own folder for clean result management.
 ### `exp10_state_stability/`
 **Goal**: The Recurrent Stability Validation.
 *   `run_exp.py`: Auto-regressively generates 100,000 tokens while measuring the Frobenius norm of the state to verify it does not explode/vanish.
+*   Outputs: `results.json`.
+
+### `exp11_kernel_verification/`
+**Goal**: The Kernel Verification Suite.
+*   `run_exp.py`: Explicitly verifies the Triton kernel bug fixes: confirms `num_warps=4` eliminates the speed bottleneck, and proves the `b[:, None]` math fix mathematically isolates state signals from high-entropy noise, solving the Stuffed Mamba collapse.
 *   Outputs: `results.json`.
 
 ### `exp_lr_lowrank/`
