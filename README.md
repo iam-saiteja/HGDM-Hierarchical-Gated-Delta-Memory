@@ -17,6 +17,7 @@
    - [Backward Pass (Gradients for all Gates)](#backward-pass-gradients-for-all-gates)
    - [Independent Key & Query Strides (v7)](#independent-key--query-strides-v7)
    - [Parameterized Block Dimensions (v8)](#parameterized-block-dimensions-v8)
+   - [Cross-Segment State Gradient Backpropagation (v9)](#cross-segment-state-gradient-backpropagation-v9)
    - [Speed & Memory Impact](#speed--memory-impact)
 4. [Experiments](#experiments)
    - [Exp 1: Language Modeling on Enwik8](#exp-1-language-modeling-on-enwik8)
@@ -178,6 +179,15 @@ weights and confirming outputs match to within float16 tolerance (max diff < 0.0
 The Triton kernels are now fully **parameterized** with block dimensions (`D_K: tl.constexpr`, `D_V: tl.constexpr`, and `CHUNK_SIZE: tl.constexpr`).
 All hardcoded dimensions (such as `64`, `32`, or `31`) have been replaced with compile-time constexpr variables.
 This enables compilation at arbitrary power-of-two dimensions (e.g. $d_k, d_v \in \{16, 32, 64, 128\}$) and custom chunk sizes without rewriting the kernel code. Autograd verification successfully confirms zero-mismatch output and gradient equivalence between Triton and pure PyTorch sequential implementations at different sizes.
+
+### Cross-Segment State Gradient Backpropagation (v9)
+
+To support correct Backpropagation Through Time (BPTT) across sequence/segment boundaries in multi-segment recurrent setups, we resolved a silent correctness bug where recurrent state gradients were being dropped.
+
+The `_chunk_bwd_kernel` backward kernel now accepts `Dstate` (gradient flowing back from downstream segments) and `Dinitial_state` (gradient propagated to upstream segments), compile-time controlled via constexpr `HAS_DSTATE` and `HAS_DINITIAL_STATE`. 
+* **State Gradient Entry:** In the backward pass, the initial chunk state gradient $dS$ is loaded directly from $Dstate$ if present, ensuring future-step recurrent signals propagate back into the kernel.
+* **State Gradient Exit:** After completing the backward sweep across all chunks, the final calculated $dS$ representing the gradient with respect to the sequence's initial state $S_{\text{prev}}$ is stored in $Dinitial\_state$.
+* **Autograd Support:** The wrapper returns `dinitial_state` back to PyTorch's autograd engine, enabling full, end-to-end BPTT across arbitrary segments. Correctness is fully validated to standard bfloat16/float16 precision limits via `scratch/verify_state_gradients.py`.
 
 ### Speed & Memory Impact
 
