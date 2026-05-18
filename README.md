@@ -369,7 +369,7 @@ All experiments were conducted on a single NVIDIA RTX 3090 Ti (24 GB). Models 
 | 16,384        | **6,060 MB**  |
 | 32,768        | **11,212 MB** |
 
-**Memory Analysis:** A standard Transformer at 32,768 tokens materializes a ^2$ attention matrix — roughly **2 GB per layer** for attention scores alone, OOM on any single GPU during training. HGDM trained at 32,768 tokens consuming **11,212 MB total** (weights + activations + optimizer state) because the recurrent state matrix is fixed at  \times d_k \times d_v = 6 \times 64 \times 64$ values per layer regardless of sequence length. Memory grows **O(N)** in input length — no quadratic attention matrix is ever materialized.
+**Memory Analysis:** A standard Transformer at 32,768 tokens materializes a $32768^2$ attention matrix — roughly **2 GB per layer** for attention scores alone, OOM on any single GPU during training. HGDM trained at 32,768 tokens consuming **11,212 MB total** (weights + activations + optimizer state) because the recurrent state matrix is fixed at $H \times d_k \times d_v = 6 \times 64 \times 64$ values per layer regardless of sequence length. Memory grows **O(N)** in input length — no quadratic attention matrix is ever materialized.
 
 **Validation:** HGDM achieved **100% accuracy across all 21 evaluation cells** — 7 sequence lengths from 512 to 32,768 tokens × 3 needle depths (10%, 50%, 90%) × 10–30 trials each. The write-gate mechanism perfectly locks a passkey signal into the fixed-size state matrix and retrieves it through up to 32,768 tokens of random byte noise, at any position in the context.
 ---
@@ -392,6 +392,8 @@ HTSPC-H3/
 │   ├── exp8_kernel_impact/   # Fused vs sequential
 │   ├── exp9_long_gating/     # Long gating at 4096
 │   ├── exp10_state_stability/ # 100k token stress test
+│   ├── exp11_kernel_verification/ # Triton kernel correctness + speed proof
+│   ├── exp12_passkey_retrieval/   # Needle-in-haystack: 100% at 32K tokens
 │   └── utils.py               # Helpers (Transformer baseline, GPU monitoring)
 └── README.md                  # This document
 ```

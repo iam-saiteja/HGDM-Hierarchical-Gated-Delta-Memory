@@ -9,6 +9,9 @@ pip install --index-url https://download.pytorch.org/whl/cu118 torch==2.2.0+cu11
 pip install -r requirements.txt
 ```
 
+
+IMPORTANT KERNEL NOTE: The Triton fused kernel currently assumes `d_k == d_v == 64`. The fast fused path will assert and fall back to the sequential implementation when head dimensions differ. This constraint is documented in `kernel_nitro.py` and in the `exp11_kernel_verification` scripts.
+
 2) Quick verification (does not run full experiments)
 
 - Verify fused vs sequential numerical consistency (if Triton kernel available):
