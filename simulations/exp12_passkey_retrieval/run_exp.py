@@ -121,10 +121,10 @@ def train_curriculum(model, device):
     curriculum = [
         {"len": 256,   "steps": 800,  "batch": 8},
         {"len": 1024,  "steps": 800,  "batch": 4},
-        {"len": 4096,  "steps": 800,  "batch": 2},
-        {"len": 8192,  "steps": 500,  "batch": 1},
-        {"len": 16384, "steps": 300,  "batch": 1},
-        {"len": 32768, "steps": 200,  "batch": 1},
+        {"len": 4096,  "steps": 1000, "batch": 2},
+        {"len": 8192,  "steps": 800,  "batch": 1},
+        {"len": 16384, "steps": 600,  "batch": 1},
+        {"len": 32768, "steps": 400,  "batch": 1},
     ]
     warmup_steps = 100
     total_steps  = sum(c["steps"] for c in curriculum)
@@ -172,6 +172,10 @@ def train_curriculum(model, device):
 
         elapsed = time.time() - t0
         print(f"  Phase done in {elapsed:.1f}s  ({steps/elapsed:.0f} steps/s)")
+        
+        # Save checkpoint after each phase
+        os.makedirs("results", exist_ok=True)
+        torch.save(model.state_dict(), f"results/ckpt_phase_L{seq_len}.pt")
 
 
 def vram_mb():
