@@ -5,6 +5,10 @@ Corrections from v6:
   2. Fixed num_warps=4 (was 2 — left half of Ampere cores idle)
   3. Fixed M = D * b[:, None] (was b[None,:] — wrong axis, silent math error)
   4. num_stages=2 for better memory prefetching on Ampere
+Corrections from v7:
+  5. Decoupled K strides from Q strides — forward and backward kernels now accept
+     independent stride_kb/kh/kt/kd arguments for K, enabling correct operation
+     under GQA/MQA layouts where Q and K have different head counts or d_k.
 """
 import torch
 import triton
@@ -23,6 +27,7 @@ def _chunk_fwd_kernel(
     seq_len,
     HAS_INITIAL_STATE: tl.constexpr,   # FIX 1: constexpr, not runtime None check
     stride_qb, stride_qh, stride_qt, stride_qd,
+    stride_kb, stride_kh, stride_kt, stride_kd,  # FIX 5: independent K strides
     stride_vb, stride_vh, stride_vt, stride_vd,
     stride_ab, stride_ah, stride_at,
     stride_bb, stride_bh, stride_bt,
@@ -33,7 +38,7 @@ def _chunk_fwd_kernel(
     head_idx  = tl.program_id(1)
 
     q_base = Q     + batch_idx * stride_qb + head_idx * stride_qh
-    k_base = K     + batch_idx * stride_qb + head_idx * stride_qh
+    k_base = K     + batch_idx * stride_kb + head_idx * stride_kh  # FIX 5: use K strides
     v_base = V     + batch_idx * stride_vb + head_idx * stride_vh
     a_base = Alpha + batch_idx * stride_ab + head_idx * stride_ah
     b_base = Beta  + batch_idx * stride_bb + head_idx * stride_bh
@@ -61,7 +66,7 @@ def _chunk_fwd_kernel(
 
         q = tl.load(q_base + offs_t_chunk[:, None] * stride_qt + offs_k[None, :] * stride_qd,
                     mask=mask_t[:, None], other=0.0).to(tl.float32)
-        k = tl.load(k_base + offs_t_chunk[:, None] * stride_qt + offs_k[None, :] * stride_qd,
+        k = tl.load(k_base + offs_t_chunk[:, None] * stride_kt + offs_k[None, :] * stride_kd,  # FIX 5
                     mask=mask_t[:, None], other=0.0).to(tl.float32)
         v = tl.load(v_base + offs_t_chunk[:, None] * stride_vt + offs_v[None, :] * stride_vd,
                     mask=mask_t[:, None], other=0.0).to(tl.float32)
@@ -123,6 +128,7 @@ def _chunk_bwd_kernel(
     DQ, DK, DV, DAlpha, DBeta,
     seq_len,
     stride_qb, stride_qh, stride_qt, stride_qd,
+    stride_kb, stride_kh, stride_kt, stride_kd,  # FIX 5: independent K strides
     stride_vb, stride_vh, stride_vt, stride_vd,
     stride_ab, stride_ah, stride_at,
     stride_bb, stride_bh, stride_bt,
@@ -132,13 +138,13 @@ def _chunk_bwd_kernel(
     head_idx  = tl.program_id(1)
 
     q_base    = Q     + batch_idx * stride_qb + head_idx * stride_qh
-    k_base    = K     + batch_idx * stride_qb + head_idx * stride_qh
+    k_base    = K     + batch_idx * stride_kb + head_idx * stride_kh  # FIX 5
     v_base    = V     + batch_idx * stride_vb + head_idx * stride_vh
     a_base    = Alpha + batch_idx * stride_ab + head_idx * stride_ah
     b_base    = Beta  + batch_idx * stride_bb + head_idx * stride_bh
     dout_base = Dout  + batch_idx * stride_vb + head_idx * stride_vh
     dq_base   = DQ    + batch_idx * stride_qb + head_idx * stride_qh
-    dk_base   = DK    + batch_idx * stride_qb + head_idx * stride_qh
+    dk_base   = DK    + batch_idx * stride_kb + head_idx * stride_kh  # FIX 5
     dv_base   = DV    + batch_idx * stride_vb + head_idx * stride_vh
     da_base   = DAlpha + batch_idx * stride_ab + head_idx * stride_ah
     db_base   = DBeta  + batch_idx * stride_bb + head_idx * stride_bh
@@ -157,7 +163,7 @@ def _chunk_bwd_kernel(
 
         q    = tl.load(q_base    + offs_t_chunk[:, None] * stride_qt + offs_k[None, :] * stride_qd,
                        mask=mask_t[:, None], other=0.0).to(tl.float32)
-        k    = tl.load(k_base    + offs_t_chunk[:, None] * stride_qt + offs_k[None, :] * stride_qd,
+        k    = tl.load(k_base    + offs_t_chunk[:, None] * stride_kt + offs_k[None, :] * stride_kd,  # FIX 5
                        mask=mask_t[:, None], other=0.0).to(tl.float32)
         v    = tl.load(v_base    + offs_t_chunk[:, None] * stride_vt + offs_v[None, :] * stride_vd,
                        mask=mask_t[:, None], other=0.0).to(tl.float32)
@@ -250,7 +256,7 @@ def _chunk_bwd_kernel(
 
         tl.store(dq_base + offs_t_chunk[:, None] * stride_qt + offs_k[None, :] * stride_qd,
                  dq, mask=mask_t[:, None])
-        tl.store(dk_base + offs_t_chunk[:, None] * stride_qt + offs_k[None, :] * stride_qd,
+        tl.store(dk_base + offs_t_chunk[:, None] * stride_kt + offs_k[None, :] * stride_kd,  # FIX 5
                  dk, mask=mask_t[:, None])
         tl.store(dv_base + offs_t_chunk[:, None] * stride_vt + offs_v[None, :] * stride_vd,
                  dv, mask=mask_t[:, None])
@@ -299,6 +305,7 @@ class FusedNitroEngine(torch.autograd.Function):
             q_s, k_s, v_s, a_s, b_s, out, states, is_s, T,
             has_init,                          # constexpr
             q_s.stride(0), q_s.stride(1), q_s.stride(2), q_s.stride(3),
+            k_s.stride(0), k_s.stride(1), k_s.stride(2), k_s.stride(3),  # FIX 5: K strides
             v_s.stride(0), v_s.stride(1), v_s.stride(2), v_s.stride(3),
             a_s.stride(0), a_s.stride(1), a_s.stride(2),
             b_s.stride(0), b_s.stride(1), b_s.stride(2),
@@ -329,6 +336,7 @@ class FusedNitroEngine(torch.autograd.Function):
             q_s, k_s, v_s, a_s, b_s, states, dout_s,
             dq, dk, dv, da, db, T,
             q_s.stride(0), q_s.stride(1), q_s.stride(2), q_s.stride(3),
+            k_s.stride(0), k_s.stride(1), k_s.stride(2), k_s.stride(3),  # FIX 5: K strides
             v_s.stride(0), v_s.stride(1), v_s.stride(2), v_s.stride(3),
             a_s.stride(0), a_s.stride(1), a_s.stride(2),
             b_s.stride(0), b_s.stride(1), b_s.stride(2),

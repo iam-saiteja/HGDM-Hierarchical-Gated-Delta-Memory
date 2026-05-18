@@ -162,6 +162,15 @@ d_alpha = d_log_a / (a + 1e-8)
 
 This fused backward eliminates the need to store the full intra‑chunk attention maps, resulting in **constant activation memory**.
 
+### Independent Key & Query Strides (v7)
+
+Both the forward and backward Triton kernels now accept **fully independent stride arguments for K**
+(`stride_kb`, `stride_kh`, `stride_kt`, `stride_kd`) separate from the Q strides. Previously, K was
+indexed with Q's strides — a latent bug that produced incorrect memory accesses whenever Q and K do
+not share the same layout (e.g., GQA/MQA where K has fewer heads, or any future asymmetric `d_k`
+configuration). The fix is verified by comparing the fused and sequential codepaths on identical
+weights and confirming outputs match to within float16 tolerance (max diff < 0.001).
+
 ### Speed & Memory Impact
 
 Compared to a naive sequential PyTorch implementation, the fused kernel yields a **67× speedup** at sequence length 4096, while maintaining comparable VRAM usage.
