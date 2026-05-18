@@ -71,7 +71,7 @@ class MultiHeadGatedDelta(nn.Module):
             
         with torch.no_grad():
             self.W_alpha.bias.copy_(torch.tensor(biases))
-            self.W_alpha.weight.zero_() 
+            torch.nn.init.normal_(self.W_alpha.weight, mean=0.0, std=0.02) 
             self.W_q.weight.data *= 0.1
             self.W_k.weight.data *= 0.1
             self.W_beta.weight.zero_()

@@ -371,6 +371,19 @@ All experiments were conducted on a single NVIDIA RTX 3090 Ti (24 GB). Models 
 | 16,384        | **6,060 MB**  |
 | 32,768        | **11,212 MB** |
 
+### Training Scheduler
+
+The training loop now uses a **warm‑up phase** followed by a **cosine‑annealing decay**. This improves early‑stage stability and helps the optimizer find a good learning‑rate schedule for long runs.
+
+```python
+warmup_steps = 100
+warmup = torch.optim.lr_scheduler.LinearLR(opt, start_factor=0.1, total_iters=warmup_steps)
+cosine = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps - warmup_steps, eta_min=lr/10)
+scheduler = torch.optim.lr_scheduler.SequentialLR(opt, schedulers=[warmup, cosine], milestones=[warmup_steps])
+```
+
+The warm‑up linearly ramps the learning rate from 10 % of the initial value to the full LR over the first 100 steps, after which the cosine schedule decays it to 10 % of the initial LR by the end of training.
+
 **Memory Analysis:** A standard Transformer at 32,768 tokens materializes a $32768^2$ attention matrix — roughly **2 GB per layer** for attention scores alone, OOM on any single GPU during training. HGDM trained at 32,768 tokens consuming **11,212 MB total** (weights + activations + optimizer state) because the recurrent state matrix is fixed at $H \times d_k \times d_v = 6 \times 64 \times 64$ values per layer regardless of sequence length. Memory grows **O(N)** in input length — no quadratic attention matrix is ever materialized.
 
 **Validation:** HGDM achieved **100% accuracy across all 21 evaluation cells** — 7 sequence lengths from 512 to 32,768 tokens × 3 needle depths (10%, 50%, 90%) × 10–30 trials each. The write-gate mechanism perfectly locks a passkey signal into the fixed-size state matrix and retrieves it through up to 32,768 tokens of random byte noise, at any position in the context.

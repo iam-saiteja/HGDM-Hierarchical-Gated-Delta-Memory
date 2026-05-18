@@ -169,8 +169,11 @@ def train_model(model, name, train_data, steps=1000, micro_batch=1, accum_steps=
     model.to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
     
-    # Cosine Decay Scheduler for overnight stability
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps, eta_min=lr/10)
+    # Warmup + Cosine Decay Scheduler for stability
+    warmup_steps = 100
+    warmup = torch.optim.lr_scheduler.LinearLR(opt, start_factor=0.1, total_iters=warmup_steps)
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps - warmup_steps, eta_min=lr/10)
+    scheduler = torch.optim.lr_scheduler.SequentialLR(opt, schedulers=[warmup, cosine], milestones=[warmup_steps])
     scaler = torch.amp.GradScaler('cuda')
     
     train_data = train_data.to(device)
