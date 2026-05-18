@@ -12,9 +12,9 @@ Each experiment is organized into its own folder for clean result management.
 *   Outputs: `results.json`, `hgdm_enwik8_120M.pt`, `transformer_enwik8_120M.pt`.
 
 ### `exp2_memory/`
-**Goal**: The $O(1)$ Memory Validation.
+**Goal**: The Memory Scaling Validation.
 *   `run_exp.py`: Tests sequences from `512` up to `16,384`.
-*   Forces the Transformer to use raw math (`FlashAttention` disabled) to expose the $O(N^2)$ quadratic explosion.
+*   Benchmarks memory growth against sequence length to expose the Transformer's $O(N^2)$ quadratic explosion.
 *   Outputs: `results.json`.
 
 ### `exp3_throughput/`
@@ -28,8 +28,8 @@ Each experiment is organized into its own folder for clean result management.
 *   Outputs: `results.json`.
 
 ### `exp5_inference/`
-**Goal**: The Infinite Context Qualitative Test.
-*   `run_exp.py`: Loads the trained Enwik8 checkpoint and generates a 2000-byte sequence.
+**Goal**: The Long-Range Generative Qualitative Test.
+*   `run_exp.py`: Loads the trained Enwik8 checkpoint and generates 2000 bytes.
 *   Outputs: `results.json`.
 
 ### `exp6_math/`

@@ -59,8 +59,10 @@ HGDM’s core sequence mixing module replaces self‑attention with a recurrent 
 
 Where:
 - \( \mathbf{k}_t \in \mathbb{R}^{d_k} \) (key) and \( \mathbf{v}_t \in \mathbb{R}^{d_v} \) (value) are projections of the input,
-- \( \boldsymbol{\alpha}_t \in [0,1] \) is a **forget gate** that controls memory retention,
-- \( \boldsymbol{\beta}_t \in [0,1] \) is a **write gate** that controls new information integration.
+- Each head computes a forget gate $\alpha_t \in [0, 1]$ and a write gate $\beta_t \in [0, 1]$ from the current token $x_t$. The states decay multiplicatively and absorb the outer product $K \otimes V$.
+
+> [!NOTE]
+> The `HGDMUltimate` class provides a `force_sequential=True` constructor flag. This allows bypassing the fused Triton kernel and routing execution through a pure PyTorch sequential loop for debugging purposes or kernel output validation.
 
 The output at time \(t\) is retrieved by querying the memory:
 
@@ -158,6 +160,9 @@ This fused backward eliminates the need to store the full intra‑chunk attentio
 ### Speed & Memory Impact
 
 Compared to a naive sequential PyTorch implementation, the fused kernel yields a **67× speedup** at sequence length 4096, while maintaining comparable VRAM usage.
+
+> [!IMPORTANT]
+> **Dimensional Constraints**: The `FusedNitroEngine` Triton kernel currently imposes a strict dimensional constraint where the head dimension must be exactly 64 ($d_k = d_v = 64$) for optimized chunkwise memory alignment.
 
 ---
 
@@ -324,6 +329,7 @@ All experiments were conducted on a single NVIDIA RTX 3090 Ti (24 GB). Models 
 HTSPC-H3/
 ├── hgdm_ultimate.py          # Core architecture (HGDMConfig, HGDMUltimate, layers)
 ├── kernel_nitro.py           # V7 Nitro Triton kernel (forward + backward)
+├── train_ultimate.py         # Top-level unified training orchestrator
 ├── simulations/
 │   ├── exp1_enwik8/          # Language modeling comparison
 │   ├── exp2_memory/          # O(N) vs O(N²) memory test
@@ -345,9 +351,18 @@ HTSPC-H3/
 
 **Requirements:** Python≥3.10, PyTorch≥2.5, Triton≥3.0, matplotlib.
 
+> [!WARNING]
+> **Hardware Dependency**: The experimental scripts, top-level orchestrators, and the Fused Nitro Kernel currently hardcode the `cuda` device. There is no CPU fallback implemented. An NVIDIA GPU is strictly required.
+
 **Installation:**
 ```bash
 pip install torch triton matplotlib
+```
+
+**Run Top-Level Training:**
+`train_ultimate.py` is the unified orchestrator. It supports CLI flags (e.g., `--only-hgdm`), handles thermal throttling (`time.sleep(20)`), and generates a comprehensive `ultimate_enwik8_results.md` report.
+```bash
+python train_ultimate.py
 ```
 
 **Run an experiment (e.g. Exp 1):**
@@ -363,7 +378,7 @@ python run_exp.py
 ### State Collapse (The Stuffed Mamba Phenomenon)
 We attempted to train HGDM on a Passkey Retrieval task and observed the identical *state collapse* phenomenon documented for Mamba (*Stuffed Mamba*, 2024). Under heavy interference (e.g., thousands of uniform random bytes), the model's state is overwritten before the retrieval query. Because the outer-product state updates write blindly across the memory matrix, high-entropy uniform noise gradually overwrites specific signals. 
 
-This limitation is not unique to HGDM but is mathematically inherent to the write‑over‑everything property of outer‑product state updates without absolute positional embeddings or extensive forgetting curriculums. However, because HGDM’s memory complexity is strictly $O(N)$ with a tiny constant, extending the training context or increasing state capacity to mitigate this effect is entirely feasible on a single GPU—a path that remains prohibitively expensive for Transformers. We leave these investigations to future work.
+This limitation is not unique to HGDM but is mathematically inherent to the write‑over‑everything property of outer‑product state updates without complex positional routing or convolutions (while HGDM includes a simple learned `pos_embedding`, it was zeroed out to evaluate pure associative gating). However, because HGDM’s memory complexity is strictly $O(N)$ with a tiny constant, extending the training context or increasing state capacity to mitigate this effect is entirely feasible on a single GPU—a path that remains prohibitively expensive for Transformers. We leave these investigations to future work.
 
 ---
 
