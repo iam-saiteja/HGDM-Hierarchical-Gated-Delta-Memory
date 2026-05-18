@@ -323,8 +323,7 @@ if __name__ == "__main__":
         d_k=64,            
         d_v=64,            
         d_ff=3072,         
-        vocab_size=256,
-        hybrid_interval=0
+        vocab_size=256
     )
     hgdm_model = HGDMUltimate(config).to(device)
     

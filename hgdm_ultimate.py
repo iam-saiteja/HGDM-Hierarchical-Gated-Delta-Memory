@@ -18,7 +18,6 @@ class HGDMConfig:
     d_v: int = 64              
     d_ff: int = 3072           
     vocab_size: int = 256      
-    hybrid_interval: int = 0   
 
 # =============================================================================
 # 2. THE COMPONENTS
