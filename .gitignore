@@ -31,3 +31,6 @@ venv/
 logs/
 tensorboard/
 *.log
+
+# Paper draft
+paper/
