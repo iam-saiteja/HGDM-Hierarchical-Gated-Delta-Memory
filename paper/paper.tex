@@ -339,7 +339,7 @@ and in the variable-$\Delta t$ (continuous-time ODE decay) variant via:
 \begin{equation}
   \alpha^{(h)}_t = \exp\!\bigl(-\Delta t^{(h)}_t \cdot \lambda^{(h)}\bigr), \quad \Delta t^{(h)}_t = \mathrm{softplus}(w_\Delta^{(h)} x_t + b_\Delta^{(h)}) + \eps_0.
 \end{equation}
-Here, the softplus bias value $b_\Delta \approx 0.5413$ is the approximate pre-image of $1.0$ under softplus with offset $\eps_0 = 10^{-3}$, yielding $\Delta t \approx 1.001$ at initialization. This guarantees that the continuous timescale step size $\Delta t$ starts near $1.0$ at step 0, preserving the cortical timescale prior at the onset of training.
+Here, the softplus bias value $b_\Delta \approx 0.5413$ is the approximate pre-image of $1.0$ under softplus with offset $\eps_0 = 10^{-3}$, yielding $\Delta t \approx 1.001$ at initialization. This ensures that the continuous timescale step size $\Delta t$ starts near $1.0$ at step 0, preserving the cortical timescale prior at the onset of training.
 
 \subsection{Write Gating and State Update}
 \label{sec:state-update}
@@ -548,7 +548,7 @@ We compare three variants: (a) Full HGDM with multi-timescale $\tau \in \{4, 30,
 The smoothed validation loss curves in Figure~\ref{fig:ablation_gating} show that the Full HGDM containing the multi-timescale prior converges faster and reaches a lower final BPB than both the uniform flat and purely learned-only baselines.
 
 \subsection{E5: Recurrent Stability}
-We generate 100{,}000 tokens autoregressively and measure $\norm{S_t}_F$ over time. This experiment empirically confirms our stability guarantees, showing that the Frobenius norm of the recurrent state remains strictly bounded during extremely long autoregressive generations, consistent with Proposition 2. We confirm that the empirical maximum decay coefficient post-training resides at $\alpha_{\max} = 0.999875$ (corresponding to target timescale $\tau=8{,}000$). Under RMSNorm normalization where average feature activations have unit root mean square, the key and value norms are bounded by $\norm{k}_2 \approx \sqrt{d_k} = 8$ and $\norm{v}_2 \approx \sqrt{d_v} = 8$, yielding $\norm{k_t \otimes v_t}_F \approx 64$. With $\beta_{\max}=1.0$, Proposition 2 yields a finite mathematical upper bound of $\norm{S_t}_F \leq 512{,}000$. The empirical recurrent state norm accumulates stably and is well below this conservative mathematical bound across the entire 100k sequence.
+We generate 100{,}000 tokens autoregressively and measure $\norm{S_t}_F$ over time. This experiment empirically confirms our stability bounds, showing that the Frobenius norm of the recurrent state remains strictly bounded during extremely long autoregressive generations, consistent with Proposition 2. We confirm that the empirical maximum decay coefficient post-training resides at $\alpha_{\max} = 0.999875$ (corresponding to target timescale $\tau=8{,}000$). Under RMSNorm normalization where average feature activations have unit root mean square, the key and value norms are bounded by $\norm{k}_2 \approx \sqrt{d_k} = 8$ and $\norm{v}_2 \approx \sqrt{d_v} = 8$, yielding $\norm{k_t \otimes v_t}_F \approx 64$. With $\beta_{\max}=1.0$, Proposition 2 yields a finite mathematical upper bound of $\norm{S_t}_F \leq 512{,}000$. The empirical recurrent state norm accumulates stably and is well below this conservative mathematical bound across the entire 100k sequence.
 
 \begin{figure}[!ht]
 \centering
@@ -590,10 +590,10 @@ This experiment benchmarks the execution speed of the Nitro Triton scan (chunk s
 We analyze the behavior of the write gate $\beta_t$ at context lengths of 4{,}096 and above on held-out Enwik8 validation text. This experiment demonstrates that the write gate functions as an active informational filter, reducing state update rates for highly predictable byte structures and focusing updates strictly on surprising, high-entropy tokens. For predictable byte sequences (e.g., repeated space padding or predictable syntax), the average write gate magnitude drops to $\bar{\beta} \approx 0.042$, whereas for high-entropy transitions (e.g., novel words or structural boundaries), it spikes to $\bar{\beta} \approx 0.89$, demonstrating highly active informational filtering.
 
 \subsection{E10: State Stability Analysis}
-We examine the eigenvalues of the state decay matrices across all layers. This experiment verifies that all eigenvalues reside strictly within the unit circle ($|\lambda_i| < 1$), mathematically confirming that the state decay dynamics are contractive and prevent any explosive recurrent behavior. Spectral analysis of the learned decay matrices confirms that the maximum absolute eigenvalue across all heads and layers is strictly bounded by $\rho(A) \approx 0.999875 < 1.0$, guaranteeing asymptotic stability and bounded-input bounded-state (BIBS) convergence.
+We examine the eigenvalues of the state decay matrices across all layers. This experiment verifies that all eigenvalues reside strictly within the unit circle ($|\lambda_i| < 1$), mathematically confirming that the state decay dynamics are contractive and prevent any explosive recurrent behavior. Spectral analysis of the learned decay matrices confirms that the maximum absolute eigenvalue across all heads and layers is strictly bounded by $\rho(A) \approx 0.999875 < 1.0$, ensuring asymptotic stability and bounded-input bounded-state (BIBS) convergence.
 
 \subsection{E11: Associative Scan Verification}
-We verify the correct vectorized prefix scan execution on Ampere hardware under custom warp-scheduling configurations. During the Triton backward pass, the prefix sum of the adjoint recurrent dynamics is mathematically formulated under the same associative operator. This guarantees that the recurrent state gradient $dS_t$ is backpropagated exactly through the chunk boundaries, maintaining complete autograd gradient continuity across the entire sequence. Empirical verification confirms that the forward and backward formulations produce numerically-consistent gradients with standard autograd, matching sequential PyTorch calculations to within machine epsilon ($\le 10^{-7}$ absolute error).
+We verify the correct vectorized prefix scan execution on Ampere hardware under custom warp-scheduling configurations. During the Triton backward pass, the prefix sum of the adjoint recurrent dynamics is mathematically formulated under the same associative operator. This ensures that the recurrent state gradient $dS_t$ is backpropagated exactly through the chunk boundaries, maintaining complete autograd gradient continuity across the entire sequence. Empirical verification confirms that the forward and backward formulations produce numerically-consistent gradients with standard autograd, matching sequential PyTorch calculations to within machine epsilon ($\le 10^{-7}$ absolute error).
 
 \subsection{E12: Context Scale Limitations}
 We test the model's performance on synthetic sequences at multiples of the training horizon $L_{\max} = 2{,}048$, up to $T = 32{,}768$ ($16{\times}L_{\max}$). This experiment demonstrates that the combination of persistent recurrent states and modular positional wrap-around logic permits safe autoregressive scaling to long sequences without context crashes. Empirical evaluation of language modeling performance (BPB) reveals no quality degradation beyond the training horizon, verifying that the positional wrap-around logic does not cause collision-driven perplexity explosion. We summarize these results in Table~\ref{tab:wrap_around}. Extension to $T = 65{,}536$ is left for future work.
@@ -804,7 +804,7 @@ natural vision.
 \newblock \emph{Science}, 287(5456):1273--1276, 2000.
 
 \bibitem{gu2022s4}
-A.\ Gu, K.\ Goel, and C.\ R\'{e}.
+A.\ Gu, K.\ Goel, and C.\ R\'e.
 \newblock Efficiently Modeling Long Sequences with Structured State Spaces.
 \newblock In \emph{International Conference on Learning Representations (ICLR)},
 2022.
@@ -893,9 +893,8 @@ I.\ Schlag, K.\ Irie, and J.\ Schmidhuber.
 \newblock In \emph{International Conference on Machine Learning (ICML)}, 2021.
 
 \bibitem{dao2022flashattention}
-T.\ Dao, D.\ Y.\ Fu, S.\ Ermon, A.\ Rudra, and C.\ R\'{e}.
-\newblock {FlashAttention}: Fast and memory-efficient exact attention with
-{IO}-awareness.
+T.\ Dao, D.\ Y.\ Fu, S.\ Ermon, A.\ Rudra, and C.\ R\'e.
+\newblock {FlashAttention}: Fast and Memory-Efficient Exact Attention with {IO}-Awareness.
 \newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)},
 2022.
 
@@ -917,10 +916,8 @@ Linguistics (EACL)}, 2017.
 
 \bibitem{tillet2019triton}
 P.\ Tillet, H.\ T.\ Kung, and D.\ Cox.
-\newblock Triton: An intermediate language and compiler for tiled neural
-network computations.
-\newblock In \emph{Proceedings of the 3rd ACM SIGPLAN International Workshop
-on Machine Learning and Programming Languages (MAPL)}, 2019.
+\newblock Triton: An Intermediate Language and Compiler for Tiled Neural Network Computations.
+\newblock In \emph{Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages (MAPL)}, 2019.
 
 \bibitem{hutter2012enwik8}
 M.\ Hutter.
