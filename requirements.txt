@@ -1,0 +1,16 @@
+# Requirements for reproducing HGDM experiments
+# Install PyTorch with CUDA appropriate for your system (e.g. cu118):
+#   pip install --index-url https://download.pytorch.org/whl/cu118 torch==2.2.0+cu118 torchvision==0.15.2+cu118
+# Then install the rest with: pip install -r requirements.txt
+
+torch==2.2.0
+triton==2.1.0
+numpy==1.25.2
+matplotlib==3.8.1
+tqdm==4.65.0
+einops==0.6.0
+pytest==7.4.0
+
+# Optional but recommended for performance:
+# - Install a CUDA build of torch matching your driver
+# - Use a modern GCC and CUDA toolkit for Triton compilation

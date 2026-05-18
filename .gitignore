@@ -8,13 +8,9 @@ data/
 *.zip
 
 # Documents (Exclude all markdown except README.md)
-*.md
-!README.md
 *.pdf
 *.doc
 *.docx
-*.txt
-
 # Python Cache
 __pycache__/
 *.pyc
