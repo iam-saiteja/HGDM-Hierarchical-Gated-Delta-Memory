@@ -90,6 +90,8 @@ This **hierarchical initialisation** provides an inductive bias for multi‑scal
 
 **Inference Memory:** During autoregressive generation, only the fixed‑size state is carried forward, giving **constant memory** regardless of generation length (verified up to 100,000 tokens).
 
+**Positional‑offset handling** – The generation routine now tracks the absolute token offset and adds the corresponding slice of the learned positional embedding (`self.pos_embedding[:, offset:offset+T, :]`). This eliminates the previous bug where every token was embedded at position 0, dramatically improving long‑form generation quality.
+
 ### Byte-Level Universality
 
 HGDM operates directly on **raw UTF‑8 bytes** (vocabulary size 256). No tokenizer, no vocabulary, no text preprocessing. This means the same architecture can process any digital modality – text, images, audio, video – as long as it can be represented as a byte stream. The model learns the structure of each modality from scratch.
