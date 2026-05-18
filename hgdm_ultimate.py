@@ -20,6 +20,7 @@ class HGDMConfig:
     vocab_size: int = 256      
     use_variable_delta_t: bool = False  # Feature 2: Variable-Delta-t Decay
     use_state_fusion: bool = False      # Feature 6: Cross-Layer State Fusion (State Highways)
+    max_position_embeddings: int = 2048 # Bug 2 Fix: Configurable positional embedding size (saves 201MB VRAM by default)
 
 # =============================================================================
 # 2. THE COMPONENTS
@@ -75,9 +76,10 @@ class MultiHeadGatedDelta(nn.Module):
     def _initialize_weights(self):
         with torch.no_grad():
             if getattr(self.config, "use_variable_delta_t", False):
-                # Initialize W_delta so initial outputs are small and stable (close to 0)
+                # Initialize W_delta weight to 0.0 for initial input-independence
                 self.W_delta.weight.zero_()
-                self.W_delta.bias.fill_(0.0)
+                # Bug 4 Fix: Initialize W_delta.bias to 0.5413 to get delta_t = 1.0 initially, preserving timescales at step 0
+                self.W_delta.bias.fill_(0.5413)
             else:
                 base_taus = [4.0, 30.0, 200.0, 1200.0, 8000.0] 
                 biases = []
@@ -150,8 +152,8 @@ class CrossLayerStateFusion(nn.Module):
     def __init__(self, config: HGDMConfig):
         super().__init__()
         self.config = config
-        # Learnable gating coefficient per layer, per head
-        self.fusion_gate = nn.Parameter(torch.zeros(config.n_layers, config.n_heads))
+        # Bug 1 Fix: Initialize fusion_gate to -4.0 so sigmoid(-4) ≈ 0.018 (starts close to 0)
+        self.fusion_gate = nn.Parameter(torch.full((config.n_layers, config.n_heads), -4.0))
 
     def fuse(self, S_current, S_prev_layer, layer_idx):
         gate = torch.sigmoid(self.fusion_gate[layer_idx])  # [H]
@@ -163,7 +165,11 @@ class HGDMUltimate(nn.Module):
         super().__init__()
         self.config = config
         self.embedding = nn.Embedding(config.vocab_size, config.d_model)
-        self.pos_embedding = nn.Parameter(torch.randn(1, 65536, config.d_model) * 0.02)
+        
+        # Bug 2 Fix: Configure positional embedding size from configuration to save VRAM
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, config.max_position_embeddings, config.d_model) * 0.02
+        )
         
         self.layers = nn.ModuleList([
             HGDMLayer(config, i, force_sequential=force_sequential) for i in range(config.n_layers)
@@ -180,7 +186,14 @@ class HGDMUltimate(nn.Module):
     def forward(self, byte_seq, states=None, offset=0):
         B, T = byte_seq.shape
         x = self.embedding(byte_seq)
-        x = x + self.pos_embedding[:, offset : offset + T, :]
+        
+        # Bug 2 Wrap-around check: Allow arbitrary token offsets during generation without out-of-bounds errors
+        pos_offset = offset % self.pos_embedding.shape[1]
+        if pos_offset + T > self.pos_embedding.shape[1]:
+            indices = torch.arange(offset, offset + T, device=byte_seq.device) % self.pos_embedding.shape[1]
+            x = x + self.pos_embedding[:, indices, :]
+        else:
+            x = x + self.pos_embedding[:, pos_offset : pos_offset + T, :]
         
         if states is None: states = [None] * len(self.layers)
         next_states = []
@@ -188,10 +201,15 @@ class HGDMUltimate(nn.Module):
         
         for i, layer in enumerate(self.layers):
             x, ns = layer(x, states[i])
+            # Bug 3 Fix: Track raw unfused recurrent state to prevent cascade explosion
+            unfused_ns = ns
+            
             # Cross-layer state highway fusion
             if getattr(self.config, "use_state_fusion", False) and i > 0 and prev_state is not None:
                 ns = self.state_fusion.fuse(ns, prev_state, i)
-            prev_state = ns
+                
+            # Cascade the unfused raw state to isolate fusion to direct adjacent connections
+            prev_state = unfused_ns
             next_states.append(ns)
             
         x = self.norm_f(x)

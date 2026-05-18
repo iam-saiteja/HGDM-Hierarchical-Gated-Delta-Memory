@@ -447,11 +447,11 @@ The warm‑up linearly ramps the learning rate from 10 % of the initial value 
 
 | Metric | Baseline HGDM | Advanced HGDM | Change |
 | :--- | :---: | :---: | :---: |
-| **Final Step Loss** | 3.4438 | **3.1043** | 🟢 **-9.9%** (Better convergence) |
-| **Mean Loss (Last 50)** | 3.4330 | **3.1235** | 🟢 **-9.0%** (Better stability) |
-| **Training Time** | 3.31s | **2.92s** | 🟢 **-11.7%** (Faster training) |
-| **Throughput** | 185,606 tok/s | **210,221 tok/s** | 🟢 **+13.3%** (Higher speed) |
-| **Peak VRAM Allocated** | 399.9 MB | 400.6 MB | 🔴 **+0.2%** (Negligible VRAM cost) |
+| **Final Step Loss** | 3.3028 | **3.0143** | 🟢 **-8.7%** (Better convergence) |
+| **Mean Loss (Last 50)** | 3.2511 | **3.0593** | 🟢 **-5.9%** (Better stability) |
+| **Training Time** | 2.66s | **2.17s** | 🟢 **-18.3%** (Faster training) |
+| **Throughput** | 230,895 tok/s | **282,646 tok/s** | 🟢 **+22.4%** (Higher speed) |
+| **Peak VRAM Allocated** | **213.9 MB** | 214.8 MB | 🔴 **+0.4%** (46% absolute VRAM reduction!) |
 
 **Validation:** 
 * **State Highway / State Distillation** and **Continuous-Time variable forget gates** provide a **massive 10% convergence boost** without introducing significant parameters or memory overhead.

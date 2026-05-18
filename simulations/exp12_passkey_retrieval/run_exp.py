@@ -253,7 +253,8 @@ def run_experiment():
         d_model=384,
         n_layers=6,
         n_heads=6,
-        vocab_size=256
+        vocab_size=256,
+        max_position_embeddings=32768
     )
     model = HGDMUltimate(config).to(device)
     n_params = sum(p.numel() for p in model.parameters())
