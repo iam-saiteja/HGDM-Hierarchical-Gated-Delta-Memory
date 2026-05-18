@@ -39,10 +39,27 @@ def get_data():
         if not os.path.exists(zip_path):
             print("Downloading enwik8 (100MB)... This may take a minute.")
             url = "http://mattmahoney.net/dc/enwik8.zip"
-            urllib.request.urlretrieve(url, zip_path)
+            try:
+                urllib.request.urlretrieve(url, zip_path)
+            except Exception as e:
+                if os.path.exists(zip_path):
+                    os.remove(zip_path)
+                raise RuntimeError(f"Failed to download enwik8 from {url}. Error: {e}")
+        
         print("Extracting enwik8...")
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(data_dir)
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(data_dir)
+        except zipfile.BadZipFile:
+            print(f"Error: {zip_path} is corrupted (BadZipFile). Deleting it so you can retry.")
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+            raise RuntimeError(
+                "Downloaded zip file was corrupted or incomplete (often happens when Matt Mahoney's site has a transient error or rate limit).\n"
+                "We deleted the bad zip file. Please run the script again to auto-retry, or download it manually with:\n"
+                "  wget -P data/ http://mattmahoney.net/dc/enwik8.zip\n"
+                "and then run this script again!"
+            )
             
     with open(data_path, 'rb') as f:
         data = f.read()
