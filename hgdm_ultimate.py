@@ -126,7 +126,7 @@ class HGDMUltimate(nn.Module):
         super().__init__()
         self.config = config
         self.embedding = nn.Embedding(config.vocab_size, config.d_model)
-        self.pos_embedding = nn.Parameter(torch.randn(1, 16384, config.d_model) * 0.02)
+        self.pos_embedding = nn.Parameter(torch.randn(1, 65536, config.d_model) * 0.02)
         
         self.layers = nn.ModuleList([
             HGDMLayer(config, i, force_sequential=force_sequential) for i in range(config.n_layers)
