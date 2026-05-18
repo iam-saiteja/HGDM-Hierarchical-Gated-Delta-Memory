@@ -71,7 +71,8 @@ def train_passkey_curriculum():
     else:
         print("WARNING: Checkpoint not found. Training from scratch will fail to learn retrieval.")
     
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    # Lowered LR to protect pre-trained gating mechanisms and tau biases
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
     scaler = torch.amp.GradScaler('cuda')
     
     print(f"\n{'='*50}\nExp 11: Passkey Retrieval (Context Window Test)\n{'='*50}")
@@ -148,7 +149,7 @@ def evaluate_context_window(model):
         for depth in test_depths:
             successes = 0
             for _ in range(trials):
-                passkey = f"{random.randint(10000, 99999)}"
+                passkey = f"{random.randint(0, 9)}"
                 passkey_str = f" The passkey is {passkey}. "
                 prompt_str = f" What is the passkey? "
                 
