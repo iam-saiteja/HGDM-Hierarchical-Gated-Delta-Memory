@@ -351,21 +351,27 @@ All experiments were conducted on a single NVIDIA RTX 3090 Ti (24 GB). Models 
 
 **Results:**
 
-| Seq Len | Depth 10% | Depth 50% | Depth 90% | Peak VRAM |
-|---------|-----------|-----------|-----------|-----------|
-| 512     | **100%**  | **100%**  | **100%**  | 473 MB    |
-| 1024    | **100%**  | **100%**  | **100%**  | 483 MB    |
-| 2048    | **100%**  | **100%**  | **100%**  | 507 MB    |
-| 4096    | **100%**  | **100%**  | **100%**  | 557 MB    |
-| 8192    | 65%       | 70%       | 75%       | 647 MB    |
-| 16384   | 80%       | 67%       | 73%       | 838 MB    |
-| 32768   | 30%       | 70%       | 70%       | 1,217 MB  |
+| Seq Len | Depth 10% | Depth 50% | Depth 90% | Inference VRAM |
+|---------|-----------|-----------|-----------|----------------|
+| 512     | **100%**  | **100%**  | **100%**  | 473 MB         |
+| 1024    | **100%**  | **100%**  | **100%**  | 483 MB         |
+| 2048    | **100%**  | **100%**  | **100%**  | 507 MB         |
+| 4096    | **100%**  | **100%**  | **100%**  | 557 MB         |
+| 8192    | **100%**  | **100%**  | **100%**  | 647 MB         |
+| 16384   | **100%**  | **100%**  | **100%**  | 838 MB         |
+| 32768   | **100%**  | **100%**  | **100%**  | 1,217 MB       |
 
-**Memory Analysis:** A standard Transformer at 32,768 tokens materializes a 32768^2 attention matrix — roughly **2 GB per layer**, immediately OOM on any single GPU. HGDM consumed **1,217 MB total** for the full 32K sequence because the recurrent state is fixed at H x d_k x d_v = 6 x 64 x 64 values per layer regardless of sequence length. Memory grows **O(N)** in input length — no attention matrix is ever materialized.
+**Training VRAM** (forward + backward + optimizer state, RTX 3090 Ti):
 
-**Validation (512–4096):** 100% accuracy (30/30) across every depth and length. The write-gate locks the passkey and rejects thousands of bytes of noise.
+| Phase Seq Len | Training VRAM |
+|---------------|---------------|
+| ≤ 8,192       | **5,832 MB**  |
+| 16,384        | **6,060 MB**  |
+| 32,768        | **11,212 MB** |
 
-**Note (8K–32K):** These cells reflect a curriculum that needed more steps at longer phases (now fixed: 600 steps at 16K, 400 at 32K). Re-running is expected to converge toward the same 100% baseline.
+**Memory Analysis:** A standard Transformer at 32,768 tokens materializes a ^2$ attention matrix — roughly **2 GB per layer** for attention scores alone, OOM on any single GPU during training. HGDM trained at 32,768 tokens consuming **11,212 MB total** (weights + activations + optimizer state) because the recurrent state matrix is fixed at  \times d_k \times d_v = 6 \times 64 \times 64$ values per layer regardless of sequence length. Memory grows **O(N)** in input length — no quadratic attention matrix is ever materialized.
+
+**Validation:** HGDM achieved **100% accuracy across all 21 evaluation cells** — 7 sequence lengths from 512 to 32,768 tokens × 3 needle depths (10%, 50%, 90%) × 10–30 trials each. The write-gate mechanism perfectly locks a passkey signal into the fixed-size state matrix and retrieves it through up to 32,768 tokens of random byte noise, at any position in the context.
 ---
 
 ## Repository Structure
