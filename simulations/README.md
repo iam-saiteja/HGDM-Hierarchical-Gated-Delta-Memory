@@ -58,9 +58,10 @@ Each experiment is organized into its own folder for clean result management.
 *   `run_exp.py`: Auto-regressively generates 100,000 tokens while measuring the Frobenius norm of the state to prove it does not explode/vanish.
 *   Outputs: `results.json`.
 
-### `exp11_passkey_retrieval/`
-**Goal**: The Effective Context Window Proof (Needle in a Haystack).
-*   `run_exp.py`: Runs a curriculum training and evaluation loop on the "Passkey Retrieval" task up to 16,384 tokens to prove exact retrieval across extreme depths.
+### Exp 11: Passkey Retrieval & State Collapse (The Stuffed Mamba Phenomenon)
+- **Goal**: Evaluate the effective context window via synthetic single-byte retrieval.
+- **Method**: Curriculum training from 512 to 16,384 sequence lengths using the pre-trained Enwik8 gating mechanisms.
+- **Result (The Stuffed Mamba Limitation)**: While HGDM successfully maintains physical state stability over 100k tokens (Exp 10), it suffers from the identical *state collapse* phenomenon documented in recent SSM literature (e.g., *Stuffed Mamba*, 2024). Because the outer-product state updates write blindly across the memory matrix, high-entropy uniform noise gradually overwrites the passkey signal. Without absolute positional embeddings or multi-day extensive forgetting curriculums, pure linear associative memories struggle with synthetic retrieval over extreme distances. This confirms HGDM's theoretical isomorphism to Mamba-class architectures in both strengths (O(1) inference) and boundaries (state interference).
 *   Outputs: `results.json`.
 
 ---
