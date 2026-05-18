@@ -9,6 +9,11 @@ Corrections from v7:
   5. Decoupled K strides from Q strides — forward and backward kernels now accept
      independent stride_kb/kh/kt/kd arguments for K, enabling correct operation
      under GQA/MQA layouts where Q and K have different head counts or d_k.
+Corrections from v8:
+  6. Parameterised block dimensions — D_K, D_V, and CHUNK_SIZE are now tl.constexpr
+     arguments. All previously hardcoded 64/32/31 literals are replaced with these
+     symbols, allowing the kernel to be compiled at any valid power-of-2 size
+     (e.g. D_K=32, D_V=32, CHUNK_SIZE=16) without modifying kernel source.
 """
 import torch
 import triton
@@ -26,6 +31,9 @@ def _chunk_fwd_kernel(
     Out, State, Initial_State,
     seq_len,
     HAS_INITIAL_STATE: tl.constexpr,   # FIX 1: constexpr, not runtime None check
+    D_K: tl.constexpr,                 # FIX 6: parameterised key dimension
+    D_V: tl.constexpr,                 # FIX 6: parameterised value dimension
+    CHUNK_SIZE: tl.constexpr,          # FIX 6: parameterised chunk length
     stride_qb, stride_qh, stride_qt, stride_qd,
     stride_kb, stride_kh, stride_kt, stride_kd,  # FIX 5: independent K strides
     stride_vb, stride_vh, stride_vt, stride_vd,
@@ -44,9 +52,9 @@ def _chunk_fwd_kernel(
     b_base = Beta  + batch_idx * stride_bb + head_idx * stride_bh
     o_base = Out   + batch_idx * stride_vb + head_idx * stride_vh
 
-    offs_k = tl.arange(0, 64)
-    offs_v = tl.arange(0, 64)
-    offs_t = tl.arange(0, 32)
+    offs_k = tl.arange(0, D_K)       # FIX 6
+    offs_v = tl.arange(0, D_V)       # FIX 6
+    offs_t = tl.arange(0, CHUNK_SIZE) # FIX 6
 
     # FIX 1: constexpr branch — compiles to two separate PTX variants
     if HAS_INITIAL_STATE:
@@ -55,12 +63,12 @@ def _chunk_fwd_kernel(
             is_ptr + offs_k[:, None] * stride_isk + offs_v[None, :] * stride_isv
         ).to(tl.float32)
     else:
-        S = tl.zeros((64, 64), dtype=tl.float32)
+        S = tl.zeros((D_K, D_V), dtype=tl.float32)  # FIX 6
 
-    num_chunks = tl.cdiv(seq_len, 32)
+    num_chunks = tl.cdiv(seq_len, CHUNK_SIZE)  # FIX 6
 
     for chunk_idx in range(num_chunks):
-        t_start      = chunk_idx * 32
+        t_start      = chunk_idx * CHUNK_SIZE  # FIX 6
         offs_t_chunk = t_start + offs_t
         mask_t       = offs_t_chunk < seq_len
 
@@ -74,39 +82,39 @@ def _chunk_fwd_kernel(
         b = tl.load(b_base + offs_t_chunk * stride_bt, mask=mask_t, other=0.0).to(tl.float32)
 
         log_a     = tl.log(a + 1e-8)
-        cum_log_a = tl.cumsum(log_a, axis=0)          # (32,)
+        cum_log_a = tl.cumsum(log_a, axis=0)          # (CHUNK_SIZE,)
 
         # Intra-chunk decay matrix: D[i,j] = exp(cum[i] - cum[j]) for i >= j
-        D            = tl.exp(cum_log_a[:, None] - cum_log_a[None, :])   # (32,32)
+        D            = tl.exp(cum_log_a[:, None] - cum_log_a[None, :])
         causal_mask  = offs_t[:, None] >= offs_t[None, :]
         D            = tl.where(causal_mask, D, 0.0)
 
         # FIX 3: beta applied at write time (rows), not read time (columns)
         # M[i,j] = D[i,j] * b[i]  — position i is the write position
-        M = D * b[:, None]                                                 # (32,32)
+        M = D * b[:, None]
 
-        QK        = tl.dot(q, tl.trans(k))                                # (32,32)
-        out_intra = tl.dot(QK * M, v)                                     # (32,64)
+        QK        = tl.dot(q, tl.trans(k))
+        out_intra = tl.dot(QK * M, v)
 
-        decay     = tl.exp(cum_log_a)                                     # (32,)
-        out_inter = tl.dot(q, S) * decay[:, None]                         # (32,64)
+        decay     = tl.exp(cum_log_a)
+        out_inter = tl.dot(q, S) * decay[:, None]
 
         out = out_intra + out_inter
         tl.store(o_base + offs_t_chunk[:, None] * stride_vt + offs_v[None, :] * stride_vd,
                  out, mask=mask_t[:, None])
 
         # State update — carry forward to next chunk
-        mask_last      = offs_t == 31
+        mask_last      = offs_t == CHUNK_SIZE - 1  # FIX 6: was hardcoded 31
         cum_log_a_last = tl.sum(tl.where(mask_last, cum_log_a, 0.0))
         last_decay     = tl.exp(cum_log_a_last)
 
         # FIX 3: D_last_row[j] = exp(cum_last - cum[j]) — decay from j to end of chunk
         # coeff[j] = D_last_row[j] * b[j]  — b at write position j
-        D_last_row = tl.exp(cum_log_a_last - cum_log_a)    # (32,)
-        coeff      = D_last_row * b                         # (32,)
+        D_last_row = tl.exp(cum_log_a_last - cum_log_a)
+        coeff      = D_last_row * b
 
-        k_weighted   = k * coeff[:, None]                  # (32,64)
-        chunk_update = tl.dot(tl.trans(k_weighted), v)     # (64,64)
+        k_weighted   = k * coeff[:, None]
+        chunk_update = tl.dot(tl.trans(k_weighted), v)
         S            = S * last_decay + chunk_update
 
         # Save state for backward pass
@@ -114,7 +122,7 @@ def _chunk_fwd_kernel(
         tl.store(
             state_ptr + offs_k[:, None] * stride_sk + offs_v[None, :] * stride_sv,
             S,
-            mask=(offs_k[:, None] < 64) & (offs_v[None, :] < 64)
+            mask=(offs_k[:, None] < D_K) & (offs_v[None, :] < D_V)  # FIX 6
         )
 
 
@@ -127,6 +135,9 @@ def _chunk_bwd_kernel(
     Q, K, V, Alpha, Beta, State, Dout,
     DQ, DK, DV, DAlpha, DBeta,
     seq_len,
+    D_K: tl.constexpr,                 # FIX 6
+    D_V: tl.constexpr,                 # FIX 6
+    CHUNK_SIZE: tl.constexpr,          # FIX 6
     stride_qb, stride_qh, stride_qt, stride_qd,
     stride_kb, stride_kh, stride_kt, stride_kd,  # FIX 5: independent K strides
     stride_vb, stride_vh, stride_vt, stride_vd,
@@ -149,15 +160,15 @@ def _chunk_bwd_kernel(
     da_base   = DAlpha + batch_idx * stride_ab + head_idx * stride_ah
     db_base   = DBeta  + batch_idx * stride_bb + head_idx * stride_bh
 
-    offs_k = tl.arange(0, 64)
-    offs_v = tl.arange(0, 64)
-    offs_t = tl.arange(0, 32)
+    offs_k = tl.arange(0, D_K)        # FIX 6
+    offs_v = tl.arange(0, D_V)        # FIX 6
+    offs_t = tl.arange(0, CHUNK_SIZE) # FIX 6
 
-    dS         = tl.zeros((64, 64), dtype=tl.float32)
-    num_chunks = tl.cdiv(seq_len, 32)
+    dS         = tl.zeros((D_K, D_V), dtype=tl.float32)  # FIX 6
+    num_chunks = tl.cdiv(seq_len, CHUNK_SIZE)              # FIX 6
 
     for chunk_idx in range(num_chunks - 1, -1, -1):
-        t_start      = chunk_idx * 32
+        t_start      = chunk_idx * CHUNK_SIZE  # FIX 6
         offs_t_chunk = t_start + offs_t
         mask_t       = offs_t_chunk < seq_len
 
@@ -176,10 +187,10 @@ def _chunk_bwd_kernel(
             state_ptr = State + batch_idx * stride_sb + head_idx * stride_sh + (chunk_idx - 1) * stride_sc
             S_prev = tl.load(
                 state_ptr + offs_k[:, None] * stride_sk + offs_v[None, :] * stride_sv,
-                mask=(offs_k[:, None] < 64) & (offs_v[None, :] < 64), other=0.0
+                mask=(offs_k[:, None] < D_K) & (offs_v[None, :] < D_V), other=0.0  # FIX 6
             )
         else:
-            S_prev = tl.zeros((64, 64), dtype=tl.float32)
+            S_prev = tl.zeros((D_K, D_V), dtype=tl.float32)  # FIX 6
 
         # Recompute forward intermediates
         log_a          = tl.log(a + 1e-8)
@@ -190,36 +201,36 @@ def _chunk_bwd_kernel(
         M              = D * b[:, None]          # FIX 3: rows, not columns
         decay          = tl.exp(cum_log_a)
 
-        mask_last      = offs_t == 31
+        mask_last      = offs_t == CHUNK_SIZE - 1  # FIX 6: was hardcoded 31
         cum_log_a_last = tl.sum(tl.where(mask_last, cum_log_a, 0.0))
         last_decay     = tl.exp(cum_log_a_last)
         D_last_row     = tl.exp(cum_log_a_last - cum_log_a)
         coeff          = D_last_row * b
 
-        QK = tl.dot(q, tl.trans(k))              # (32,32)
+        QK = tl.dot(q, tl.trans(k))
 
         # ── Gradient computation ──────────────────────────────────
 
         # Inter path
-        q_S_prev     = tl.dot(q, S_prev)                              # (32,64)
-        d_decay      = tl.sum(dout * q_S_prev, axis=1)                # (32,)
-        dq_inter     = tl.dot(dout * decay[:, None], tl.trans(S_prev))# (32,64)
-        dS_prev_inter = tl.dot(tl.trans(q), dout * decay[:, None])    # (64,64)
+        q_S_prev      = tl.dot(q, S_prev)
+        d_decay       = tl.sum(dout * q_S_prev, axis=1)
+        dq_inter      = tl.dot(dout * decay[:, None], tl.trans(S_prev))
+        dS_prev_inter = tl.dot(tl.trans(q), dout * decay[:, None])
 
         # Intra path
-        d_A       = tl.dot(dout, tl.trans(v))    # (32,32)
+        d_A       = tl.dot(dout, tl.trans(v))
         d_QK      = d_A * M
         d_M       = d_A * QK
 
-        dq_intra  = tl.dot(d_QK, k)              # (32,64)
-        dk_intra  = tl.dot(tl.trans(d_QK), q)    # (32,64)
-        dv        = tl.dot(tl.trans(QK * M), dout)# (32,64)
+        dq_intra  = tl.dot(d_QK, k)
+        dk_intra  = tl.dot(tl.trans(d_QK), q)
+        dv        = tl.dot(tl.trans(QK * M), dout)
 
         # FIX 3: d_b from rows of d_M (consistent with M = D * b[:, None])
         d_D       = d_M * b[:, None]
-        d_b_intra = tl.sum(d_M * D, axis=1)      # sum over columns → (32,)
+        d_b_intra = tl.sum(d_M * D, axis=1)      # sum over columns
 
-        d_delta    = d_D * D
+        d_delta     = d_D * D
         d_cum_intra = tl.sum(d_delta, axis=1) - tl.sum(d_delta, axis=0)
         d_cum_intra += d_decay * decay
 
@@ -229,8 +240,8 @@ def _chunk_bwd_kernel(
         d_last_decay   = tl.sum(dS * S_prev)
 
         k_weighted   = k * coeff[:, None]
-        d_k_weighted = tl.dot(v, tl.trans(dS))   # (32,64)
-        d_v_update   = tl.dot(k_weighted, dS)    # (32,64)
+        d_k_weighted = tl.dot(v, tl.trans(dS))
+        d_v_update   = tl.dot(k_weighted, dS)
         dv           += d_v_update
 
         d_coeff    = tl.sum(d_k_weighted * k, axis=1)
@@ -248,11 +259,11 @@ def _chunk_bwd_kernel(
         d_cum_last    += d_last_decay * last_decay
         d_cum          = d_cum_intra + d_cum_log_a + tl.where(mask_last, d_cum_last, 0.0)
 
-        cum_dcum  = tl.cumsum(d_cum, axis=0)
+        cum_dcum   = tl.cumsum(d_cum, axis=0)
         total_dcum = tl.sum(d_cum, axis=0)
-        d_log_a   = total_dcum - cum_dcum + d_cum
-        d_alpha   = d_log_a / (a + 1e-8)
-        dq        = dq_inter + dq_intra
+        d_log_a    = total_dcum - cum_dcum + d_cum
+        d_alpha    = d_log_a / (a + 1e-8)
+        dq         = dq_inter + dq_intra
 
         tl.store(dq_base + offs_t_chunk[:, None] * stride_qt + offs_k[None, :] * stride_qd,
                  dq, mask=mask_t[:, None])
@@ -270,12 +281,18 @@ def _chunk_bwd_kernel(
 # AUTOGRAD WRAPPER
 # ──────────────────────────────────────────────────────────────────
 
+# Default chunk size — can be overridden per-call via fused_nitro_scan(chunk_size=...)
+_DEFAULT_CHUNK_SIZE = 32
+
 class FusedNitroEngine(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, alpha, beta, state=None):
+    def forward(ctx, q, k, v, alpha, beta, state=None, chunk_size=_DEFAULT_CHUNK_SIZE):
         B, T, H, dk = q.shape
         dv = v.shape[-1]
-        assert dk == 64 and dv == 64, f"Kernel requires d_k=d_v=64, got {dk},{dv}"
+        # FIX 6: assert power-of-2 only, not fixed size
+        assert dk & (dk - 1) == 0, f"d_k must be a power of 2, got {dk}"
+        assert dv & (dv - 1) == 0, f"d_v must be a power of 2, got {dv}"
+        assert chunk_size & (chunk_size - 1) == 0, f"chunk_size must be a power of 2, got {chunk_size}"
 
         # Inputs must be float16 or bfloat16 for Triton dot to use tensor cores
         # alpha/beta stay float32 for numerical stability
@@ -287,9 +304,9 @@ class FusedNitroEngine(torch.autograd.Function):
         a_s = alpha.transpose(1, 2).contiguous().float()
         b_s = beta.transpose(1, 2).contiguous().float()
 
-        num_chunks = math.ceil(T / 32)
+        num_chunks = math.ceil(T / chunk_size)          # FIX 6
         out    = torch.empty_like(v_s)
-        states = torch.empty((B, H, num_chunks, 64, 64),
+        states = torch.empty((B, H, num_chunks, dk, dv), # FIX 6
                              device=q.device, dtype=torch.float32).contiguous()
 
         has_init = state is not None
@@ -303,7 +320,8 @@ class FusedNitroEngine(torch.autograd.Function):
         grid = (B, H)
         _chunk_fwd_kernel[grid](
             q_s, k_s, v_s, a_s, b_s, out, states, is_s, T,
-            has_init,                          # constexpr
+            has_init,                          # constexpr HAS_INITIAL_STATE
+            dk, dv, chunk_size,                # FIX 6: D_K, D_V, CHUNK_SIZE constexprs
             q_s.stride(0), q_s.stride(1), q_s.stride(2), q_s.stride(3),
             k_s.stride(0), k_s.stride(1), k_s.stride(2), k_s.stride(3),  # FIX 5: K strides
             v_s.stride(0), v_s.stride(1), v_s.stride(2), v_s.stride(3),
@@ -316,25 +334,30 @@ class FusedNitroEngine(torch.autograd.Function):
         )
 
         ctx.save_for_backward(q_s, k_s, v_s, a_s, b_s, states)
-        ctx.dtype = dtype
+        ctx.dtype      = dtype
+        ctx.chunk_size = chunk_size
         return out.transpose(1, 2).to(dtype).contiguous(), states[:, :, -1].to(dtype)
 
     @staticmethod
     def backward(ctx, dout, dstate):
         q_s, k_s, v_s, a_s, b_s, states = ctx.saved_tensors
         B, H, T = q_s.shape[:3]
+        dk = q_s.shape[3]
+        dv = v_s.shape[3]
+        chunk_size = ctx.chunk_size
 
         dout_s = dout.transpose(1, 2).contiguous().float()
         dq = torch.empty_like(q_s)
-        dk = torch.empty_like(k_s)
-        dv = torch.empty_like(v_s)
+        dk_ = torch.empty_like(k_s)
+        dv_ = torch.empty_like(v_s)
         da = torch.empty_like(a_s)
         db = torch.empty_like(b_s)
 
         grid = (B, H)
         _chunk_bwd_kernel[grid](
             q_s, k_s, v_s, a_s, b_s, states, dout_s,
-            dq, dk, dv, da, db, T,
+            dq, dk_, dv_, da, db, T,
+            dk, dv, chunk_size,                # FIX 6: D_K, D_V, CHUNK_SIZE constexprs
             q_s.stride(0), q_s.stride(1), q_s.stride(2), q_s.stride(3),
             k_s.stride(0), k_s.stride(1), k_s.stride(2), k_s.stride(3),  # FIX 5: K strides
             v_s.stride(0), v_s.stride(1), v_s.stride(2), v_s.stride(3),
@@ -348,18 +371,25 @@ class FusedNitroEngine(torch.autograd.Function):
         dtype = ctx.dtype
         return (
             dq.transpose(1,2).to(dtype),
-            dk.transpose(1,2).to(dtype),
-            dv.transpose(1,2).to(dtype),
+            dk_.transpose(1,2).to(dtype),
+            dv_.transpose(1,2).to(dtype),
             da.transpose(1,2).to(dtype),
             db.transpose(1,2).to(dtype),
             None,   # dstate
+            None,   # chunk_size has no gradient
         )
 
 
-def fused_nitro_scan(q, k, v, alpha, beta, state=None):
+def fused_nitro_scan(q, k, v, alpha, beta, state=None, chunk_size=_DEFAULT_CHUNK_SIZE):
     """
     Drop-in replacement for chunkwise_hgdm_forward.
     Works on any CUDA GPU with Triton support (no external libraries).
     RTX 3090 Ti: Ampere cc8.6, fully compatible.
+
+    Args:
+        q, k, v  : (B, T, H, d_k/d_v) — must be power-of-2 last dim
+        alpha, beta: (B, T, H)
+        state    : optional initial state (B, H, d_k, d_v)
+        chunk_size: int, must be power of 2 (default 32)
     """
-    return FusedNitroEngine.apply(q, k, v, alpha, beta, state)
+    return FusedNitroEngine.apply(q, k, v, alpha, beta, state, chunk_size)

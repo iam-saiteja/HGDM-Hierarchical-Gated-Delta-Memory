@@ -15,6 +15,8 @@
    - [Chunkwise Parallel Scan](#chunkwise-parallel-scan)
    - [Forward Pass](#forward-pass)
    - [Backward Pass (Gradients for all Gates)](#backward-pass-gradients-for-all-gates)
+   - [Independent Key & Query Strides (v7)](#independent-key--query-strides-v7)
+   - [Parameterized Block Dimensions (v8)](#parameterized-block-dimensions-v8)
    - [Speed & Memory Impact](#speed--memory-impact)
 4. [Experiments](#experiments)
    - [Exp 1: Language Modeling on Enwik8](#exp-1-language-modeling-on-enwik8)
@@ -171,12 +173,18 @@ not share the same layout (e.g., GQA/MQA where K has fewer heads, or any future 
 configuration). The fix is verified by comparing the fused and sequential codepaths on identical
 weights and confirming outputs match to within float16 tolerance (max diff < 0.001).
 
+### Parameterized Block Dimensions (v8)
+
+The Triton kernels are now fully **parameterized** with block dimensions (`D_K: tl.constexpr`, `D_V: tl.constexpr`, and `CHUNK_SIZE: tl.constexpr`).
+All hardcoded dimensions (such as `64`, `32`, or `31`) have been replaced with compile-time constexpr variables.
+This enables compilation at arbitrary power-of-two dimensions (e.g. $d_k, d_v \in \{16, 32, 64, 128\}$) and custom chunk sizes without rewriting the kernel code. Autograd verification successfully confirms zero-mismatch output and gradient equivalence between Triton and pure PyTorch sequential implementations at different sizes.
+
 ### Speed & Memory Impact
 
 Compared to a naive sequential PyTorch implementation, the fused kernel yields a **67× speedup** at sequence length 4096, while maintaining comparable VRAM usage.
 
 > [!IMPORTANT]
-> **Dimensional Constraints**: The `FusedNitroEngine` Triton kernel currently imposes a strict dimensional constraint where the head dimension must be exactly 64 ($d_k = d_v = 64$) for optimized chunkwise memory alignment.
+> **Dimensional Constraints**: The `FusedNitroEngine` Triton kernel requires that the head dimensions $d_k, d_v$ and the chunk size are power-of-two integers (e.g. 16, 32, 64, 128) for optimal GPU memory alignment and block scheduling.
 
 ---
 
