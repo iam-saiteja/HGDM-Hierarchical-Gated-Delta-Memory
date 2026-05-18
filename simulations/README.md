@@ -68,6 +68,11 @@ Each experiment is organized into its own folder for clean result management.
 *   `run_exp.py`: Uses Curriculum Learning to train the model to locate and extract a passkey hidden in up to 32,768 tokens of byte noise, proving the architecture's long-range associative gating.
 *   Outputs: `results.json`.
 
+### `exp13_architectural_advancements/`
+**Goal**: The Advanced Features Verification.
+*   `run_exp.py`: Trains and benchmarks the baseline model against the advanced model containing Variable-$\Delta t$ Gating and Cross-Layer State Fusion to demonstrate convergence gains.
+*   Outputs: `results.json`.
+
 ### `exp_lr_lowrank/`
 **Goal**: The Low-Rank State Ablation.
 *   `run_exp.py`: Trains a low-rank HGDM prototype that compresses the per-head state into an r-dimensional latent.

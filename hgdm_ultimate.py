@@ -18,6 +18,8 @@ class HGDMConfig:
     d_v: int = 64              
     d_ff: int = 3072           
     vocab_size: int = 256      
+    use_variable_delta_t: bool = False  # Feature 2: Variable-Delta-t Decay
+    use_state_fusion: bool = False      # Feature 6: Cross-Layer State Fusion (State Highways)
 
 # =============================================================================
 # 2. THE COMPONENTS
@@ -51,26 +53,42 @@ class MultiHeadGatedDelta(nn.Module):
         self.W_q = nn.Linear(config.d_model, self.H * self.d_k, bias=False)
         self.W_k = nn.Linear(config.d_model, self.H * self.d_k, bias=False)
         self.W_v = nn.Linear(config.d_model, self.H * self.d_v, bias=False)
-        self.W_alpha = nn.Linear(config.d_model, self.H)
-        self.W_beta  = nn.Linear(config.d_model, self.H)
         
+        # Advanced Feature 2: Variable-Delta-t Continuous Decay
+        if getattr(config, "use_variable_delta_t", False):
+            base_taus = [4.0, 30.0, 200.0, 1200.0, 8000.0]
+            initial_lambdas = []
+            for h in range(self.H):
+                tau = base_taus[h % len(base_taus)]
+                initial_lambdas.append(1.0 / tau)
+            self.W_lambda = nn.Parameter(torch.log(torch.tensor(initial_lambdas, dtype=torch.float32)))
+            self.W_delta = nn.Linear(config.d_model, self.H, bias=True)
+        else:
+            self.W_alpha = nn.Linear(config.d_model, self.H)
+            
+        self.W_beta  = nn.Linear(config.d_model, self.H)
         self.W_out_gate = nn.Linear(config.d_model, self.H * self.d_v)
         self.W_o = nn.Linear(self.H * self.d_v, config.d_model, bias=False)
         
         self._initialize_weights()
 
     def _initialize_weights(self):
-        base_taus = [4.0, 30.0, 200.0, 1200.0, 8000.0] 
-        biases = []
-        for h in range(self.H):
-            tau = base_taus[h % len(base_taus)] 
-            alpha_target = math.exp(-1.0 / tau)
-            bias_val = math.log(alpha_target / (1.0 - alpha_target + 1e-8))
-            biases.append(bias_val)
-            
         with torch.no_grad():
-            self.W_alpha.bias.copy_(torch.tensor(biases))
-            torch.nn.init.normal_(self.W_alpha.weight, mean=0.0, std=0.02) 
+            if getattr(self.config, "use_variable_delta_t", False):
+                # Initialize W_delta so initial outputs are small and stable (close to 0)
+                self.W_delta.weight.zero_()
+                self.W_delta.bias.fill_(0.0)
+            else:
+                base_taus = [4.0, 30.0, 200.0, 1200.0, 8000.0] 
+                biases = []
+                for h in range(self.H):
+                    tau = base_taus[h % len(base_taus)] 
+                    alpha_target = math.exp(-1.0 / tau)
+                    bias_val = math.log(alpha_target / (1.0 - alpha_target + 1e-8))
+                    biases.append(bias_val)
+                self.W_alpha.bias.copy_(torch.tensor(biases))
+                torch.nn.init.normal_(self.W_alpha.weight, mean=0.0, std=0.02) 
+
             self.W_q.weight.data *= 0.1
             self.W_k.weight.data *= 0.1
             self.W_beta.weight.zero_()
@@ -84,7 +102,14 @@ class MultiHeadGatedDelta(nn.Module):
         k = self.W_k(x).view(B, T, self.H, self.d_k)
         v = self.W_v(x).view(B, T, self.H, self.d_v)
         
-        alpha = torch.sigmoid(self.W_alpha(x))
+        # Advanced Feature 2: Variable-Delta-t ODE Decay
+        if getattr(self.config, "use_variable_delta_t", False):
+            delta_t = F.softplus(self.W_delta(x)) + 1e-3
+            lambdas = torch.exp(self.W_lambda)
+            alpha = torch.exp(-delta_t * lambdas[None, None, :])
+        else:
+            alpha = torch.sigmoid(self.W_alpha(x))
+            
         beta  = torch.sigmoid(self.W_beta(x))
         out_gate = torch.sigmoid(self.W_out_gate(x)).view(B, T, self.H, self.d_v)
 
@@ -120,6 +145,19 @@ class HGDMLayer(nn.Module):
         x = x + self.ffn(self.norm2(x))
         return x, new_mixer_state
 
+# Advanced Feature 6: Cross-Layer State Fusion (State Highways)
+class CrossLayerStateFusion(nn.Module):
+    def __init__(self, config: HGDMConfig):
+        super().__init__()
+        self.config = config
+        # Learnable gating coefficient per layer, per head
+        self.fusion_gate = nn.Parameter(torch.zeros(config.n_layers, config.n_heads))
+
+    def fuse(self, S_current, S_prev_layer, layer_idx):
+        gate = torch.sigmoid(self.fusion_gate[layer_idx])  # [H]
+        gate = gate[None, :, None, None]                   # broadcast to [1, H, 1, 1]
+        return S_current + gate * S_prev_layer             # additive state highway
+
 class HGDMUltimate(nn.Module):
     def __init__(self, config: HGDMConfig, force_sequential=False):
         super().__init__()
@@ -131,6 +169,10 @@ class HGDMUltimate(nn.Module):
             HGDMLayer(config, i, force_sequential=force_sequential) for i in range(config.n_layers)
         ])
         
+        # Advanced Feature 6: State Fusion Highway
+        if getattr(config, "use_state_fusion", False):
+            self.state_fusion = CrossLayerStateFusion(config)
+            
         self.norm_f = RMSNorm(config.d_model)
         self.fc_out = nn.Linear(config.d_model, config.vocab_size, bias=False)
         self.fc_out.weight = self.embedding.weight
@@ -142,8 +184,14 @@ class HGDMUltimate(nn.Module):
         
         if states is None: states = [None] * len(self.layers)
         next_states = []
+        prev_state = None
+        
         for i, layer in enumerate(self.layers):
             x, ns = layer(x, states[i])
+            # Cross-layer state highway fusion
+            if getattr(self.config, "use_state_fusion", False) and i > 0 and prev_state is not None:
+                ns = self.state_fusion.fuse(ns, prev_state, i)
+            prev_state = ns
             next_states.append(ns)
             
         x = self.norm_f(x)
