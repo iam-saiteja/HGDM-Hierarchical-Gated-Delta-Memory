@@ -68,11 +68,11 @@ and $O(T/C)$ sequential depth with $O(C)$ parallel width per chunk, where $C$
 is the chunk size. Importantly, while training stores per-chunk intermediate
 boundary states yielding $O(T)$ sequence-length training memory, autoregressive
 inference runs with constant ($O(1)$) memory footprint by carrying only the
-fixed-size state forward. On Enwik8, a 120\,M HGDM with Cross-Layer State Fusion
+fixed-size state forward. On Enwik8, a 122\,M HGDM with Cross-Layer State Fusion
 reaches 1.72\,BPB after 1{,}000 steps, and the base HGDM reaches 1.85\,BPB,
 both outperforming a matched Tied+SwiGLU Transformer baseline (2.45\,BPB) and
 a vanilla Transformer baseline (3.68\,BPB) under equal compute, while
-exhibiting linear training scaling and constant inference-time memory.
+exhibiting linear training scaling and constant inference-time memory. After curriculum fine-tuning, HGDM achieves 100\% passkey retrieval accuracy at 32{,}768 tokens.
 \end{abstract}
 
 % ─── 1. Introduction ─────────────────────────────────────────────────────────
@@ -117,6 +117,7 @@ Hierarchical Gated Delta Memory, and show that the resulting model:
   that does not grow with generation length, giving $O(1)$ inference-time memory
   independent of context, while training stores per-chunk states giving $O(T)$ total memory,
   \item achieves competitive language-modeling quality,
+  \item achieves 100\% passkey retrieval accuracy up to 32{,}768 context length after curriculum fine-tuning,
   \item and trains efficiently via a custom Triton parallel scan.
 \end{itemize}
 
@@ -251,7 +252,7 @@ Each HGDM layer wraps the multi-head recurrent mixer with pre-normalization and 
 A single linear layer with weight tying ($W_{\text{out}} = E^\top$) maps $x_t \in \R^d$ to byte-level logits, reducing the parameters and stabilizing optimization \cite{press2017tying}.
 
 \subsection{Hyperparameter Configuration}
-The 122\,M baseline uses: $d = 768$, $L = 12$ layers, $H = 12$ heads, $d_k = d_v = 64$, $d_{\text{ff}} = 3072$, and $L_{\max} = 2048$. Total parameters $\approx 122$\,M (referred to as ``120\,M'' throughout for brevity).
+The 122\,M baseline uses: $d = 768$, $L = 12$ layers, $H = 12$ heads, $d_k = d_v = 64$, $d_{\text{ff}} = 3072$, and $L_{\max} = 2048$. Total parameters $\approx 122$\,M.
 
 % ─── 4. HGDM Internals ────────────────────────────────────────────────────────
 \section{Components}
@@ -339,7 +340,7 @@ and in the variable-$\Delta t$ (continuous-time ODE decay) variant via:
 \begin{equation}
   \alpha^{(h)}_t = \exp\!\bigl(-\Delta t^{(h)}_t \cdot \lambda^{(h)}\bigr), \quad \Delta t^{(h)}_t = \mathrm{softplus}(w_\Delta^{(h)} x_t + b_\Delta^{(h)}) + \eps_0.
 \end{equation}
-Here, the softplus bias value $b_\Delta \approx 0.5413$ is the approximate pre-image of $1.0$ under softplus with offset $\eps_0 = 10^{-3}$, yielding $\Delta t \approx 1.001$ at initialization. This ensures that the continuous timescale step size $\Delta t$ starts near $1.0$ at step 0, preserving the cortical timescale prior at the onset of training.
+Here, the softplus bias value $b_\Delta$ is initialized to $0.5413$ so that $\mathrm{softplus}(0.5413) + \eps_0 \approx 1.001$ at step 0. This ensures that the continuous timescale step size $\Delta t$ starts near $1.0$ at the onset of training, preserving the cortical timescale prior at initialization.
 
 \subsection{Write Gating and State Update}
 \label{sec:state-update}
@@ -366,26 +367,22 @@ Crucially, a cascading feedback recursion down the network where layer $l+1$ rec
 
 \subsection{Complexity and Stability}
 \begin{proposition}[Time and Memory Complexity]
-An HGDM layer processes length $T$ sequences in $O(T d_k d_v)$ sequential operations (or $O(T/C)$ sequential chunk depth under Nitro, where each chunk of size $C$ is processed in $O(\log C)$ depth via parallel scan) with $O(d_k d_v)$ persistent memory per head, ensuring constant memory footprint during autoregressive generation.
+An HGDM layer processes length $T$ sequences in $O(T d_k d_v)$ total sequential operations (or $O((T/C) \log C)$ total depth with $O(T)$ work under parallel scan with chunk size $C$) with $O(d_k d_v)$ persistent memory per head, ensuring constant memory footprint during autoregressive generation.
 \end{proposition}
 
 \begin{proposition}[Bounded State Norms]
-Let the state sequence update according to Equation~\eqref{eq:state_update}. Assume $\alpha_t \in (0, \alpha_{\max}]$ with $\alpha_{\max} < 1$, $\|\beta_t\| \leq \beta_{\max}$, $\|k_t\|_2 \leq \|k\|_2$, and $\|v_t\|_2 \leq \|v\|_2$. Then the Frobenius norm of the recurrent state is bounded for all $t$ via the geometric series:
+Let the state sequence update according to Equation~\eqref{eq:state_update}. Assume $\alpha_t \in (0, \alpha_{\max}]$ with $\alpha_{\max} < 1$, $\|\beta_t\| \leq \beta_{\max}$, $\|k_t\|_2 \leq \|k\|_2$, and $\|v_t\|_2 \leq \|v\|_2$. Under these assumptions, the Frobenius norm of the recurrent state is bounded for all $t$ via the geometric series:
 \begin{equation}
   \norm{S_t}_F \leq \frac{\beta_{\max}\,\norm{k}_2\,\norm{v}_2}{1 - \alpha_{\max}}.
 \end{equation}
-Under the empirically observed \emph{post-training} values $\alpha_{\max} = 0.999875$
-(corresponding to the $\tau=8{,}000$ head; note this bound applies post-training and
-does not constrain $\alpha$ during the training process itself),
-$\beta_{\max} = 1.0$, $\norm{k}_2 \approx \sqrt{d_k} = 8$, $\norm{v}_2 \approx \sqrt{d_v} = 8$,
-this yields $\norm{S_t}_F \leq 64 / 0.000125 = 512{,}000 < \infty$.
+When evaluating this bound using the empirically observed post-training maximum decay parameter $\alpha_{\max} = 0.999875$ (corresponding to the $\tau=8{,}000$ head), $\beta_{\max} = 1.0$, and RMSNorm-bounded feature magnitudes $\norm{k}_2 \approx \sqrt{d_k} = 8$, $\norm{v}_2 \approx \sqrt{d_v} = 8$, we obtain a finite mathematical upper bound of $\norm{S_t}_F \leq 64 / 0.000125 = 512{,}000 < \infty$. We emphasize that this bound holds post-training based on the learned decay parameters and does not mathematically constrain $\alpha_t$ during the optimization process itself.
 \end{proposition}
 
 % ─── 5. The Nitro Kernel ──────────────────────────────────────────────────────
 \section{The Nitro Kernel}
 \label{sec:nitro}
 
-The Nitro kernel implements the parallel associative prefix scan for the MHGD recurrence using the Triton compiler \cite{tillet2019triton}. We summarize the operator, correctness notes, and performance characteristics here; full pseudocode and verification details are in the algorithm listing below. While the model class supports a sequential PyTorch fallback path for CPU execution and verification (E11), all speed and capacity experiments utilize the optimized Nitro Triton path. Nitro executes the recurrence in $O(T)$ total work. Within each chunk of size $C$, the parallel prefix scan runs in $O(\log C)$ depth; chunks are processed sequentially, so the overall sequential depth is $O(T/C)$ chunks with $O(\log C)$ depth each. This does not alter the underlying memory complexity of the model; rather, it optimizes parallelization and execution throughput at the hardware layer. All experiments reported in this paper use the default chunk size $C = 32$.
+The Nitro kernel implements the parallel associative prefix scan for the MHGD recurrence using the Triton compiler \cite{tillet2019triton}. We summarize the operator, correctness notes, and performance characteristics here; full pseudocode and verification details are in the algorithm listing below. While the model class supports a sequential PyTorch fallback path for CPU execution and verification (E11), all speed and capacity experiments utilize the optimized Nitro Triton path. Nitro executes the recurrence in $O(T)$ total work. Within each chunk of size $C$, the parallel prefix scan runs in $O(\log C)$ depth; chunks are processed sequentially, so the overall sequential depth is $O((T/C) \log C)$ total depth, executing with $O(T)$ total work. This does not alter the underlying memory complexity of the model; rather, it optimizes parallelization and execution throughput at the hardware layer. All experiments reported in this paper use the default chunk size $C = 32$.
 
 \begin{algorithm}
 \caption{Nitro Parallel Scan (Triton, per head)}
@@ -480,27 +477,27 @@ We train HGDM and a comparable 122\,M Transformer on Enwik8 for 1{,}000 steps to
 
 \begin{table}[!ht]
 \centering
-\caption{Enwik8 snapshot after 1{,}000 training steps ($\approx$24.6\,M tokens; BPB = bits-per-byte). All HGDM and Transformer BPB values are on a held-out validation set via \texttt{evaluate\_model}, 50 random batches of batch size 4 ($\text{SE} \approx 0.012$). The \emph{primary} Transformer comparison is Transformer\textsuperscript{\textdagger} (weight tying, SwiGLU, RMSNorm), which matches HGDM's component choices. The vanilla Transformer (no tying, SiLU, LayerNorm) is included as a secondary reference. \textbf{Note: literature baselines are near-convergence results trained for orders of magnitude more tokens; they are listed as long-run targets only and are not directly comparable to the 1{,}000-step snapshots above the divider.}}
+\caption{Enwik8 snapshot comparison. All HGDM and Transformer BPB values are on a held-out validation set via \texttt{evaluate\_model}, 50 random batches of batch size 4 ($\text{SE} \approx 0.012$). The \emph{primary} Transformer comparison is Transformer\textsuperscript{\textdagger} (weight tying, SwiGLU, RMSNorm), which matches HGDM's component choices. The vanilla Transformer (no tying, SiLU, LayerNorm) is included as a secondary reference. \textbf{Note: literature baselines are near-convergence results trained for orders of magnitude more tokens; they are listed as long-run targets only and are not directly comparable to the 1{,}000-step snapshots above the divider.}}
 \label{tab:enwik8}
-\begin{tabular}{lrrr}
+\begin{tabular}{lrrrr}
 \toprule
-Model & BPB $\downarrow$ & Peak memory (GB) & Steps/sec \\
+Model & BPB $\downarrow$ & Peak memory (GB) & Steps/sec & Tokens Trained \\
 \midrule
-\multicolumn{4}{l}{\textit{1{,}000-step snapshots, $\approx$24.6\,M tokens (this work)}} \\
-Transformer\textsuperscript{\textdagger} (122M, Tied+SwiGLU) \textbf{[primary]} & 2.45 & 3.42 & 1.58 \\
-Transformer (122M, vanilla)                            & 3.68 & 3.65 & 1.69 \\
-HGDM (122M)                                           & 1.85 & 4.44 & 1.12 \\
-HGDM + Fusion                                         & \textbf{1.72} & 4.45 & 1.11 \\
+\multicolumn{5}{l}{\textit{1{,}000-step snapshots (this work)}} \\
+Transformer\textsuperscript{\textdagger} (122M, Tied+SwiGLU) \textbf{[primary]} & 2.45 & 3.42 & 1.58 & 24.6\,M \\
+Transformer (122M, vanilla)                            & 3.68 & 3.65 & 1.69 & 24.6\,M \\
+HGDM (122M)                                           & 1.85 & 4.44 & 1.12 & 24.6\,M \\
+HGDM + Fusion                                         & \textbf{1.72} & 4.45 & 1.11 & 24.6\,M \\
 \midrule
-\multicolumn{4}{l}{\textit{Literature baselines (near convergence, different compute --- not directly comparable)}} \\
-MambaByte (120M) \cite{wang2024mambabyte}  & 1.34 & --- & --- \\
-MEGABYTE (120M) \cite{yu2023megabyte}      & 1.48 & --- & --- \\
-RWKV-4 (120M) \cite{peng2023rwkv}          & 1.42 & --- & --- \\
+\multicolumn{5}{l}{\textit{Literature baselines (near convergence --- not directly comparable)}} \\
+MambaByte (120M) \cite{wang2024mambabyte}  & 1.34 & --- & --- & $\approx$250\,B \\
+MEGABYTE (120M) \cite{yu2023megabyte}      & 1.48 & --- & --- & $\approx$40\,B \\
+RWKV-4 (120M) \cite{peng2023rwkv}          & 1.42 & --- & --- & $\approx$330\,B \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-We report the training snapshot after 1{,}000 update steps in Table~\ref{tab:enwik8}. HGDM + Fusion achieves 1.72\,BPB, outperforming the Tied+SwiGLU Transformer (2.45\,BPB) by 0.73\,BPB under equal compute. While HGDM's absolute training memory is slightly higher at $T=2{,}048$ ($4.44$\,GB vs.\ $3.42$\,GB) due to persistent recurrent state storage, its memory footprint remains strictly bounded and constant ($O(1)$) as sequence length scales (E2), whereas the Transformer baseline quickly encounters quadratic VRAM explosion and OOM errors at scale.
+We report the training snapshot after 1{,}000 update steps in Table~\ref{tab:enwik8}. HGDM + Fusion achieves 1.72\,BPB, outperforming the Tied+SwiGLU Transformer (2.45\,BPB) by 0.73\,BPB under equal compute. While HGDM's absolute training memory is moderately higher at $T=2{,}048$ ($4.44$\,GB vs.\ $3.42$\,GB) due to persistent recurrent state storage, its memory footprint remains strictly bounded and constant ($O(1)$) as sequence length scales (E2), whereas the Transformer baseline quickly encounters quadratic VRAM explosion and OOM errors at scale.
 
 The literature baselines (MambaByte, MEGABYTE, RWKV-4) are trained for substantially more compute and are listed solely as long-run targets to contextualize HGDM's trajectory, not as a same-budget comparison. A fair comparison would require running all models to the same number of tokens seen; we leave this to future work due to single-GPU compute constraints.
 
@@ -512,7 +509,7 @@ The literature baselines (MambaByte, MEGABYTE, RWKV-4) are trained for substanti
 \end{figure}
 
 \subsection{E2: Memory Scaling}
-We benchmark peak GPU memory from sequence length 512 to 16{,}384. This experiment empirically demonstrates that HGDM operates with $O(1)$ constant memory during sequence generation at inference, bypassing the quadratic memory growth of standard Transformers and remaining flat across all evaluated sequence lengths while standard Transformers quickly grow and eventually trigger Out-of-Memory (OOM) errors. However, during training, HGDM requires storing intermediate chunk boundary states to support backpropagation through time, resulting in training memory that is slightly higher than the Transformer baseline at short-to-medium context lengths ($4.44$\,GB vs. $3.65$\,GB at $T=2{,}048$).
+We benchmark peak GPU memory from sequence length 512 to 16{,}384. This experiment empirically demonstrates that HGDM operates with $O(1)$ constant memory during sequence generation at inference, bypassing the quadratic memory growth of standard Transformers and remaining flat across all evaluated sequence lengths while standard Transformers quickly grow and eventually trigger Out-of-Memory (OOM) errors. However, during training, HGDM requires storing intermediate chunk boundary states to support backpropagation through time, resulting in training memory that is moderately higher than the Transformer baseline at short-to-medium context lengths ($4.44$\,GB vs. $3.65$\,GB at $T=2{,}048$).
 
 \begin{figure}[!ht]
 \centering
@@ -667,10 +664,9 @@ Neuroscientific validation (evaluating HGDM internal states as encoding models f
 We introduced HGDM, a hierarchical gated delta memory architecture that
 eliminates tokenization, eliminates self-attention, fixes inference memory to $O(1)$
 regardless of context, and grounds its design in three replicated neuroscientific
-findings. The central claim is simple: surprise is all you need. An
-architecture whose compute scales with informational content, not sequence
+findings. The central thesis is that an architecture whose activity scales with input informativeness, not sequence
 length, is both more faithful to biological computation and more efficient by
-construction. HGDM is a first step toward that architecture.
+construction. HGDM represents a first step toward that architecture.
 
 \paragraph{Code.}
 All code, checkpoints, and experiment scripts are publicly available at \url{https://github.com/iam-saiteja/HGDM-Hierarchical-Gated-Delta-Memory}.
