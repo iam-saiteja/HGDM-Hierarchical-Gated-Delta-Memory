@@ -199,7 +199,7 @@ All experiments were conducted on a single NVIDIA RTX 3090 Ti (24 GB). Models 
 | 8192    | 2352 MB   | 12962 MB         |
 | 16384   | **3180 MB** | **OOM**          |
 
-**Proof:** HGDM memory grows by only 2× when scaling 32× in length; Transformer crashes. This enables training on sequences 32× longer on the same hardware.
+**Validation:** HGDM memory grows by only 2× when scaling 32× in length; Transformer crashes. This enables training on sequences 32× longer on the same hardware.
 
 ---
 
@@ -215,7 +215,7 @@ All experiments were conducted on a single NVIDIA RTX 3090 Ti (24 GB). Models 
 | 2048    | 57k          | 51k                 |
 | 8192    | **61k**      | 26k                 |
 
-**Proof:** Transformer throughput drops sharply with length due to quadratic attention; HGDM becomes **2.3× faster** at 8k tokens and its throughput stays constant.
+**Validation:** Transformer throughput drops sharply with length due to quadratic attention; HGDM becomes **2.3× faster** at 8k tokens and its throughput stays constant.
 
 ---
 
@@ -231,7 +231,7 @@ All experiments were conducted on a single NVIDIA RTX 3090 Ti (24 GB). Models 
 | Flat (τ=200)     | 2.73      |
 | Learned (random) | **2.70**  |
 
-**Proof:** All variants perform similarly; the architecture can **learn appropriate timescales from data**. The multi‑scale initialisation provides a beneficial inductive bias but is not a brittle requirement.
+**Validation:** All variants perform similarly; the architecture can **learn appropriate timescales from data**. The multi‑scale initialisation provides a beneficial inductive bias but is not a brittle requirement.
 
 ---
 
@@ -244,7 +244,7 @@ All experiments were conducted on a single NVIDIA RTX 3090 Ti (24 GB). Models 
 **Output (excerpt):**  
 *“The quick brown fox jumps over the lazy dogma and do not. The scholarship of discovering the pop principles of the During them are broadcast and immense seasons are very defrayed by burning it. … Einstein's theory of the charter as the England|Economic feudpal …”*
 
-**Proof:** The model produces structurally coherent Wikipedia‑style text with headings and links over 2000 bytes, showing no degradation.
+**Demonstration:** The model produces structurally coherent Wikipedia‑style text with headings and links over 2000 bytes, showing no degradation.
 
 ---
 
@@ -258,13 +258,13 @@ All experiments were conducted on a single NVIDIA RTX 3090 Ti (24 GB). Models 
 
 `Solve for x: 10x + 5 = 105. Answer: x = 8`
 
-**Proof:** HGDM transfers seamlessly to mathematical reasoning, demonstrating its byte‑level universality.
+**Validation:** HGDM transfers seamlessly to mathematical reasoning, demonstrating its byte‑level universality.
 
 ---
 
 ### Exp 7: Multimodal Byte-Level Learning
 
-**Goal:** Prove HGDM can learn raw byte distributions from different modalities.
+**Goal:** Demonstrate HGDM can learn raw byte distributions from different modalities.
 
 **Setup:** Train 120M model from scratch on synthetic audio (PCM chord), image (Mandelbrot 256×256 RGB), video (bouncing ball, 30 frames). 500 steps each.
 
@@ -274,7 +274,7 @@ All experiments were conducted on a single NVIDIA RTX 3090 Ti (24 GB). Models 
 | Image    | **0.097** | 2.15 GB        |
 | Video    | 4.25      | 2.15 GB        |
 
-**Proof:** The image BPB is near zero (perfect memorisation of the deterministic fractal). VRAM is **identical across modalities**, confirming architecture‑level agnosticism.
+**Validation:** The image BPB is near zero (perfect memorisation of the deterministic fractal). VRAM is **identical across modalities**, confirming architecture‑level agnosticism.
 
 ---
 
@@ -290,7 +290,7 @@ All experiments were conducted on a single NVIDIA RTX 3090 Ti (24 GB). Models 
 | 2048    | 102k          | 1.5k              | 65×     |
 | 4096    | **105k**      | 1.5k              | **67×** |
 
-**Proof:** The fused kernel is essential for practical training; a naive loop is 67× slower.
+**Validation:** The fused kernel is essential for practical training; a naive loop is 67× slower.
 
 ---
 
@@ -305,7 +305,7 @@ All experiments were conducted on a single NVIDIA RTX 3090 Ti (24 GB). Models 
 | Full        | 4.38      |
 | Flat        | **4.07**  |
 
-**Proof:** Even with a single fixed forget rate, HGDM learns well, demonstrating architecture robustness.
+**Validation:** Even with a single fixed forget rate, HGDM learns well, demonstrating architecture robustness.
 
 ---
 
