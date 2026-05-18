@@ -1,5 +1,8 @@
+"""
+Exp 12: Passkey Retrieval — The Needle In A Haystack Test
+Revised v3: Dense masked loss, warmup, fixed indexing, smoke test guard.
+"""
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import random
 import time
@@ -10,170 +13,239 @@ import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from hgdm_ultimate import HGDMUltimate, HGDMConfig
 
-def generate_passkey_batch(batch_size, seq_len, device):
-    """
-    Generates a batch of noise with a hidden passkey.
-    Uses dense masked supervision so the model learns the prompt bytes.
-    """
-    x = torch.randint(97, 122, (batch_size, seq_len), device=device, dtype=torch.long)
-    y = torch.zeros_like(x)
-    loss_mask = torch.zeros_like(x, dtype=torch.float32)
-    
-    for b in range(batch_size):
-        passkey = str(random.randint(0, 9))
-        
-        # 1. First Prompt
-        prompt_1 = "The passkey is " + passkey + ". "
-        p1_bytes = [ord(c) for c in prompt_1]
-        
-        max_idx = (seq_len // 2) - len(p1_bytes)
-        if max_idx < 0: max_idx = 0
-        insert_idx = random.randint(0, max_idx)
-        
-        x[b, insert_idx:insert_idx+len(p1_bytes)] = torch.tensor(p1_bytes, device=device)
-        
-        for t in range(len(p1_bytes)-1):
-            y[b, insert_idx + t] = p1_bytes[t+1]
-            loss_mask[b, insert_idx + t] = 1.0
-            
-        # 2. Second Prompt (Question)
-        prompt_2 = "What is the passkey? "
-        p2_bytes = [ord(c) for c in prompt_2]
-        
-        start_q = seq_len - len(p2_bytes)
-        x[b, start_q:seq_len] = torch.tensor(p2_bytes, device=device)
-        
-        for t in range(len(p2_bytes)-1):
-            y[b, start_q + t] = p2_bytes[t+1]
-            loss_mask[b, start_q + t] = 1.0
-            
-        # 3. Final Answer
-        # The last token of x predicts the passkey byte
-        y[b, -1] = ord(passkey)
-        loss_mask[b, -1] = 5.0 # Boost weight for the actual needle retrieval
-        
-    return x, y, loss_mask
+# ─────────────────────────────────────────────────────────────────
+# Dataset
+# ─────────────────────────────────────────────────────────────────
+PASSKEY_PREFIX = b"The passkey is "          # 15 bytes
+PASSKEY_SUFFIX = b". "                        # 2 bytes
+QUESTION       = b"What is the passkey? "    # 21 bytes
 
-def train_curriculum(model, opt, device):
+def make_batch(batch_size: int, seq_len: int, device, fixed_depth: float = None):
+    """
+    Build a batch of sequences.
+    x[t]  -> model input token at position t
+    y[t]  -> correct next token (only supervised at masked positions)
+    mask  -> float weight per position (0 = ignore, 1 = prompt byte, 5 = digit answer)
+
+    Layout (left-to-right):
+      [noise] [PASSKEY_PREFIX + digit + PASSKEY_SUFFIX] [noise] [QUESTION + digit]
+                                                                  ^--- model predicts here
+
+    The very last input token is the space after '?'.
+    The model must output the passkey digit byte.
+    """
+    x    = torch.randint(97, 123, (batch_size, seq_len), dtype=torch.long, device=device)
+    y    = torch.zeros_like(x)
+    mask = torch.zeros(batch_size, seq_len, dtype=torch.float32, device=device)
+
+    q_len = len(QUESTION)  # 21
+
+    for b in range(batch_size):
+        digit  = random.randint(0, 9)
+        digit_byte = ord(str(digit))
+
+        # ── 1. Build the passkey sentence and embed it ─────────────────
+        sentence = PASSKEY_PREFIX + bytes([digit_byte]) + PASSKEY_SUFFIX
+        s_bytes  = list(sentence)                            # length = 18
+
+        # Needle position: random in first half, or fixed depth if given
+        haystack_end = seq_len - q_len - 1                  # last safe insertion point
+        if fixed_depth is not None:
+            needle_start = max(0, min(int(fixed_depth * seq_len), haystack_end - len(s_bytes)))
+        else:
+            needle_start = random.randint(0, max(0, haystack_end // 2 - len(s_bytes)))
+
+        x[b, needle_start : needle_start + len(s_bytes)] = torch.tensor(s_bytes, device=device)
+
+        # Supervise the passkey sentence (predict the next byte in sequence)
+        for t in range(len(s_bytes) - 1):
+            y[b, needle_start + t] = s_bytes[t + 1]
+            mask[b, needle_start + t] = 1.0
+
+        # ── 2. Embed the question at the very end ──────────────────────
+        q_bytes = list(QUESTION)
+        q_start = seq_len - q_len
+        x[b, q_start : seq_len] = torch.tensor(q_bytes, device=device)
+
+        # Supervise the question bytes
+        for t in range(q_len - 1):
+            y[b, q_start + t] = q_bytes[t + 1]
+            mask[b, q_start + t] = 1.0
+
+        # ── 3. The answer ──────────────────────────────────────────────
+        # x[-1] = last byte of QUESTION (the space after '?')
+        # y[-1] = digit byte  ← highest-weight supervision target
+        y[b, -1] = digit_byte
+        mask[b, -1] = 10.0
+
+    return x, y, mask
+
+
+# ─────────────────────────────────────────────────────────────────
+# Smoke Test (ensures the task is learnable at trivial difficulty)
+# ─────────────────────────────────────────────────────────────────
+def smoke_test(model, device):
+    """
+    100-step sanity check with seq_len=64 (tiny context).
+    If the model can't crack this, something is broken architecturally.
+    """
+    print("\n[Smoke Test] seq_len=64, fixed needle at position 0...")
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    model.train()
+    for step in range(200):
+        opt.zero_grad(set_to_none=True)
+        x, y, mask = make_batch(16, 64, device, fixed_depth=0.0)
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            logits = model(x)[0]
+            ce = F.cross_entropy(logits.view(-1, 256), y.view(-1), reduction='none')
+            loss = (ce * mask.view(-1)).sum() / mask.sum()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        opt.step()
+        if step % 50 == 0:
+            pred = logits[:, -1, :].argmax(-1)
+            acc  = (pred == y[:, -1]).float().mean().item() * 100
+            print(f"  step {step:3d} | loss {loss.item():.3f} | acc {acc:.0f}%")
+    print("[Smoke Test] done.\n")
+    return model
+
+
+# ─────────────────────────────────────────────────────────────────
+# Curriculum Training
+# ─────────────────────────────────────────────────────────────────
+def train_curriculum(model, device):
     print("="*60)
     print("EXP 12: PASSKEY RETRIEVAL (THE NEEDLE TEST)")
     print("="*60)
-    
-    # Phase 1: 256
-    # Phase 2: 1024
-    # Phase 3: 4096
+
     curriculum = [
-        {"len": 256, "steps": 500},
-        {"len": 1024, "steps": 500},
-        {"len": 4096, "steps": 500}
+        {"len": 256,  "steps": 800,  "batch": 8},
+        {"len": 1024, "steps": 800,  "batch": 4},
+        {"len": 4096, "steps": 800,  "batch": 2},
     ]
-    
-    model.train()
+    warmup_steps = 100
+    total_steps  = sum(c["steps"] for c in curriculum)
+
+    opt    = torch.optim.AdamW(model.parameters(), lr=0.0, weight_decay=0.01)
+    sched  = torch.optim.lr_scheduler.OneCycleLR(
+        opt, max_lr=1e-3, total_steps=total_steps, pct_start=0.1,
+        anneal_strategy='cos', div_factor=25, final_div_factor=100
+    )
     scaler = torch.amp.GradScaler('cuda')
-    
-    total_step = 0
+
+    model.train()
+    global_step = 0
+
     for phase in curriculum:
         seq_len = phase["len"]
-        steps = phase["steps"]
-        print(f"\n--- Phase Context Length: {seq_len} ---")
-        
+        steps   = phase["steps"]
+        batch   = phase["batch"]
+        print(f"\n--- Phase: seq_len={seq_len} | steps={steps} | batch={batch} ---")
         t0 = time.time()
+
         for step in range(steps):
             opt.zero_grad(set_to_none=True)
-            
-            x, y, loss_mask = generate_passkey_batch(8 if seq_len <= 1024 else 2, seq_len, device)
-            
+            x, y, mask = make_batch(batch, seq_len, device)
+
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 logits = model(x)[0]
-                
-                # Dense masked sequence loss
-                ce_loss = F.cross_entropy(logits.view(-1, 256), y.view(-1), reduction='none')
-                loss = (ce_loss * loss_mask.view(-1)).sum() / loss_mask.sum()
-            
+                ce   = F.cross_entropy(logits.view(-1, 256), y.view(-1), reduction='none')
+                loss = (ce * mask.view(-1)).sum() / mask.sum()
+
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(opt)
             scaler.update()
-            
-            if step % 100 == 0:
-                # Accuracy on just the needle prediction
-                pred = logits[:, -1, :].argmax(dim=-1)
-                acc = (pred == y[:, -1]).float().mean().item() * 100
-                print(f"Step {step:4d} | Dense Loss: {loss.item():.4f} | Needle Accuracy: {acc:5.1f}%")
-                
-        print(f"Phase Complete in {time.time()-t0:.1f}s")
-        
+            sched.step()
+            global_step += 1
+
+            if step % 200 == 0:
+                with torch.no_grad():
+                    pred = logits[:, -1, :].argmax(-1)
+                    acc  = (pred == y[:, -1]).float().mean().item() * 100
+                lr = opt.param_groups[0]['lr']
+                print(f"  step {step:4d} | loss {loss.item():.3f} | needle_acc {acc:.0f}% | lr {lr:.2e}")
+
+        elapsed = time.time() - t0
+        print(f"  Phase done in {elapsed:.1f}s  ({steps/elapsed:.0f} steps/s)")
+
+
+# ─────────────────────────────────────────────────────────────────
+# Evaluation Grid
+# ─────────────────────────────────────────────────────────────────
 def evaluate_grid(model, device):
-    print("\n--- EVALUATION GRID ---")
+    print("\n" + "="*60)
+    print("EVALUATION GRID")
+    print("="*60)
     model.eval()
-    
-    lengths = [1024, 2048, 4096, 8192]
-    depths = [0.1, 0.5, 0.9] # How far into the context the passkey is hidden
-    
-    results_grid = {}
-    
+
+    lengths = [512, 1024, 2048, 4096]
+    depths  = [0.1, 0.5, 0.9]
+    n_trials = 30
+    results  = {}
+
     with torch.no_grad():
         for L in lengths:
-            results_grid[L] = {}
+            results[L] = {}
             for D in depths:
                 correct = 0
-                total = 10
-                
-                for _ in range(total):
-                    x = torch.randint(97, 122, (1, L), device=device, dtype=torch.long)
-                    passkey = str(random.randint(0, 9))
-                    
-                    p1 = "The passkey is " + passkey + ". "
-                    insert_idx = int(L * D)
-                    # ensure it fits
-                    if insert_idx + len(p1) > L - 50:
-                        insert_idx = L - 50 - len(p1)
-                        
-                    x[0, insert_idx:insert_idx+len(p1)] = torch.tensor([ord(c) for c in p1], device=device)
-                    
-                    p2 = "What is the passkey? "
-                    start_q = L - len(p2)
-                    x[0, start_q:L] = torch.tensor([ord(c) for c in p2], device=device)
-                    
+                example_shown = False
+                for _ in range(n_trials):
+                    x, y, _ = make_batch(1, L, device, fixed_depth=D)
                     with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                         logits = model(x)[0]
-                    
                     pred_byte = logits[0, -1, :].argmax().item()
-                    
-                    # Add logging so we can see the actual generations!
-                    if _ < 1:
-                        print(f"    [Debug] L={L}, Depth={D} | Target: {passkey} | Generated: {chr(pred_byte)}")
-                        
-                    if chr(pred_byte) == passkey:
-                        correct += 1
-                        
-                acc = (correct / total) * 100
-                results_grid[L][D] = acc
-                print(f"L={L:4d} | Depth={D:.1f} | Accuracy: {acc:5.1f}%")
-                
-    return results_grid
+                    target    = y[0, -1].item()
 
+                    if not example_shown:
+                        print(f"  [Sample] L={L}, depth={D:.1f} | "
+                              f"target={chr(target)}({target}) | "
+                              f"generated={chr(pred_byte) if 32 <= pred_byte < 127 else '?'}({pred_byte})")
+                        example_shown = True
+
+                    if pred_byte == target:
+                        correct += 1
+
+                acc = correct / n_trials * 100
+                results[L][D] = round(acc, 1)
+                print(f"  L={L:4d} | depth={D:.1f} | acc={acc:5.1f}% ({correct}/{n_trials})")
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────
 def run_experiment():
+    if not torch.cuda.is_available():
+        print("CUDA required."); sys.exit(1)
+
     device = torch.device('cuda')
+
     config = HGDMConfig(
         d_model=384,
-        n_layers=4, # Tiny model (10M params) for ultra-fast convergence on reasoning tasks
+        n_layers=6,
         n_heads=6,
         vocab_size=256
     )
     model = HGDMUltimate(config).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=8e-4)
-    
-    train_curriculum(model, opt, device)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"Model params: {n_params/1e6:.1f}M")
+
+    # 1. Smoke test first — catches broken architecture before wasting GPU time
+    model = smoke_test(model, device)
+
+    # 2. Full curriculum
+    train_curriculum(model, device)
+
+    # 3. Evaluation
     grid = evaluate_grid(model, device)
-    
+
     os.makedirs("results", exist_ok=True)
     with open("results/results.json", "w") as f:
         json.dump(grid, f, indent=4)
+    print("\nResults saved to results/results.json")
 
 if __name__ == "__main__":
-    if not torch.cuda.is_available():
-        print("CUDA required.")
-        sys.exit(1)
     run_experiment()
