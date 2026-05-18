@@ -71,8 +71,8 @@ def train_passkey_curriculum():
     else:
         print("WARNING: Checkpoint not found. Training from scratch will fail to learn retrieval.")
     
-    # Lowered LR to protect pre-trained gating mechanisms and tau biases
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    # Lowered LR to 5e-5 for stable fine-tuning of the pre-trained Enwik8 checkpoint
+    opt = torch.optim.AdamW(model.parameters(), lr=5e-5)
     scaler = torch.amp.GradScaler('cuda')
     
     print(f"\n{'='*50}\nExp 11: Passkey Retrieval (Context Window Test)\n{'='*50}")
@@ -102,9 +102,10 @@ def train_passkey_curriculum():
                 logits, _ = model(x)
                 loss_all = nn.CrossEntropyLoss(reduction='none')(logits.view(-1, 256), y.view(-1)).view(2, -1)
                 
-                # Focus 100% of the network's capacity on the retrieval task (last token)
+                # Include full sequence loss to stabilize gradients, plus a boost for the passkey
                 loss_passkey = loss_all[:, -1:].mean()
-                loss = loss_passkey
+                loss_seq = loss_all.mean()
+                loss = loss_seq + loss_passkey
                 
             scaler.scale(loss).backward()
             scaler.step(opt)
