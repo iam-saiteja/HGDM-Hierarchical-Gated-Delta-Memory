@@ -60,7 +60,8 @@ def train_passkey_curriculum():
     curriculum = [
         (512, 100),
         (1024, 100),
-        (2048, 100)
+        (2048, 100),
+        (4096, 100)
     ]
     
     t_start = time.time()
@@ -125,8 +126,16 @@ def evaluate_context_window(model):
                 
                 with torch.no_grad():
                     with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                        # Generate with very low temp to emulate greedy argmax
-                        generated = model.generate(prompt_tensor, max_new_bytes=5, temp=1e-5)
+                        # Pure argmax greedy decoding to avoid sampling noise
+                        generated = prompt_tensor
+                        logits, states = model(prompt_tensor)
+                        next_byte = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+                        generated = torch.cat([generated, next_byte], dim=1)
+                        for _ in range(4):
+                            logits, next_states = model(next_byte, states)
+                            states = next_states
+                            next_byte = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+                            generated = torch.cat([generated, next_byte], dim=1)
                         
                 gen_bytes = generated[0, -5:].cpu().numpy().tolist()
                 try:
