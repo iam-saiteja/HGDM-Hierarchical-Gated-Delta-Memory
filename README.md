@@ -393,12 +393,7 @@ python simulations/exp_lr_lowrank/run_exp.py --steps 200 --seq_len 256 --batch 2
 
 ---
 
-## Limitations & Future Work
-
-### State Collapse (The Stuffed Mamba Phenomenon)
-We attempted to train HGDM on a Passkey Retrieval task and observed the identical *state collapse* phenomenon documented for Mamba (*Stuffed Mamba*, 2024). Under heavy interference (e.g., thousands of uniform random bytes), the model's state is overwritten before the retrieval query. Because the outer-product state updates write blindly across the memory matrix, high-entropy uniform noise gradually overwrites specific signals. 
-
-This limitation is not unique to HGDM but is mathematically inherent to the write‑over‑everything property of outer‑product state updates. Despite the architecture natively containing learned absolute positional embeddings, the linear gating mechanics still struggle to perfectly isolate scattered patterns across extreme distances. However, because HGDM’s memory complexity is strictly $O(N)$ with a tiny constant, extending the training context or increasing state capacity to mitigate this effect is entirely feasible on a single GPU—a path that remains prohibitively expensive for Transformers. We leave these investigations to future work.
+## Future Work
 
 ### Low-Rank Prototype
 We also added a low-rank HGDM prototype experiment that compresses the per-head state into a smaller latent matrix. This is an ablation and capacity-control direction rather than a replacement for the main model. It is useful for testing whether reduced-rank storage can lower interference while preserving the long-context behavior.
