@@ -136,10 +136,10 @@ class HGDMUltimate(nn.Module):
         self.fc_out = nn.Linear(config.d_model, config.vocab_size, bias=False)
         self.fc_out.weight = self.embedding.weight
 
-    def forward(self, byte_seq, states=None):
+    def forward(self, byte_seq, states=None, offset=0):
         B, T = byte_seq.shape
         x = self.embedding(byte_seq)
-        x = x + self.pos_embedding[:, :T, :]
+        x = x + self.pos_embedding[:, offset : offset + T, :]
         
         if states is None: states = [None] * len(self.layers)
         next_states = []
@@ -159,11 +159,14 @@ class HGDMUltimate(nn.Module):
         next_probs = F.softmax(next_logit, dim=-1)
         next_byte = torch.multinomial(next_probs, num_samples=1)
         generated = torch.cat([generated, next_byte], dim=1)
+        
+        offset = prompt_bytes.shape[1]
         for _ in range(max_new_bytes - 1):
-            logits, next_states = self.forward(next_byte, states)
+            logits, next_states = self.forward(next_byte, states, offset=offset)
             states = next_states
             next_logit = logits[:, -1, :] / temp
             next_probs = F.softmax(next_logit, dim=-1)
             next_byte = torch.multinomial(next_probs, num_samples=1)
             generated = torch.cat([generated, next_byte], dim=1)
+            offset += 1
         return generated
