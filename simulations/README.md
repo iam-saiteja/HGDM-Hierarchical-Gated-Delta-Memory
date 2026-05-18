@@ -60,12 +60,12 @@ Each experiment is organized into its own folder for clean result management.
 
 ### `exp11_kernel_verification/`
 **Goal**: The Kernel Verification Suite.
-*   `run_exp.py`: Explicitly verifies the Triton kernel bug fixes: confirms `num_warps=4` eliminates the speed bottleneck, and proves the `b[:, None]` math fix mathematically isolates state signals from high-entropy noise, solving the Stuffed Mamba collapse.
+*   `run_exp.py`: Contains scripts to verify the Triton kernel bug fixes. Benchmarks show `num_warps=4` improves throughput on Ampere GPUs, and empirical tests exercise the `b[:, None]` axis correction that fixes a silent math error in the state update. These are empirical verifications, not formal proofs; see `exp11_kernel_verification` for results and notes.
 *   Outputs: `results.json`.
 
 ### `exp12_passkey_retrieval/`
 **Goal**: The Needle In A Haystack (Passkey) Test.
-*   `run_exp.py`: Uses Curriculum Learning to train the model to locate and extract a passkey hidden in up to 8,192 tokens of byte noise, proving the architecture's long-range associative gating.
+*   `run_exp.py`: Uses Curriculum Learning to train the model to locate and extract a passkey hidden in up to 32,768 tokens of byte noise, proving the architecture's long-range associative gating.
 *   Outputs: `results.json`.
 
 ### `exp_lr_lowrank/`
