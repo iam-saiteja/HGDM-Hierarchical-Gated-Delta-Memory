@@ -39,13 +39,12 @@ def generate_passkey_batch(batch_size, seq_len, device):
         p2_bytes = [ord(c) for c in prompt_2]
         
         # The sequence ends with the prompt, the target y ends with the passkey
-        end_idx = seq_len - 1
-        start_q = end_idx - len(p2_bytes)
+        start_q = seq_len - len(p2_bytes)
         
-        x[b, start_q:end_idx] = torch.tensor(p2_bytes, device=device)
+        x[b, start_q:seq_len] = torch.tensor(p2_bytes, device=device)
         
         # The target at the very last position should be the passkey byte
-        y[b, end_idx] = passkey_byte
+        y[b, -1] = passkey_byte
         
         # To avoid penalizing noise predictions, we can use a loss mask later,
         # but for simplicity we will just compute CE on the last token.
@@ -130,13 +129,18 @@ def evaluate_grid(model, device):
                     x[0, insert_idx:insert_idx+len(p1)] = torch.tensor([ord(c) for c in p1], device=device)
                     
                     p2 = "What is the passkey? "
-                    start_q = L - len(p2) - 1
-                    x[0, start_q:L-1] = torch.tensor([ord(c) for c in p2], device=device)
+                    start_q = L - len(p2)
+                    x[0, start_q:L] = torch.tensor([ord(c) for c in p2], device=device)
                     
                     with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                         logits = model(x)[0]
                     
-                    pred_byte = logits[0, -2, :].argmax().item()
+                    pred_byte = logits[0, -1, :].argmax().item()
+                    
+                    # Add logging so we can see the actual generations!
+                    if _ < 1:
+                        print(f"    [Debug] L={L}, Depth={D} | Target: {passkey} | Generated: {chr(pred_byte)}")
+                        
                     if chr(pred_byte) == passkey:
                         correct += 1
                         
