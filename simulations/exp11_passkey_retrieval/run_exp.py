@@ -6,49 +6,39 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')
 import torch
 import torch.nn as nn
 import time
-import json
 import random
+import json
 from hgdm_ultimate import HGDMUltimate, HGDMConfig
 from utils import get_gpu_memory_usage
 
-def generate_passkey_data(batch_size, seq_len, depth, device):
+def generate_copy_data(batch_size, seq_len, device):
     """
-    Generates synthetic passkey data.
-    depth: float between 0.0 and 1.0 indicating where to place the passkey.
-    Returns x (inputs) and y (targets).
+    Generates Selective Copy data.
+    Pattern (10 random digits) + Separator (':') + Noise (random lowercase) + Trigger ('=') + Pattern
     """
     x_batch = []
     y_batch = []
-    keys = []
     
     for _ in range(batch_size):
-        passkey = f"{random.randint(0, 9)}"
-        keys.append(passkey)
-        passkey_str = f" The passkey is {passkey}. "
-        prompt_str = f" What is the passkey? {passkey}"
+        # 10 random digits as the pattern to copy
+        pattern = torch.randint(48, 58, (10,), dtype=torch.uint8)
         
-        fixed_len = len(passkey_str) + len(prompt_str)
-        noise_len = max(0, seq_len - fixed_len)
+        # Noise: random lowercase letters
+        noise_len = max(0, seq_len - 12) # 10 pattern + 2 markers
+        noise = torch.randint(97, 123, (noise_len,), dtype=torch.uint8)
         
-        pos = int(noise_len * depth)
+        sep = torch.tensor([58], dtype=torch.uint8) # ':'
+        trig = torch.tensor([61], dtype=torch.uint8) # '='
         
-        # Noise: random lowercase ASCII letters
-        noise1 = torch.randint(97, 123, (pos,), dtype=torch.uint8)
-        noise2 = torch.randint(97, 123, (noise_len - pos,), dtype=torch.uint8)
-        
-        p1 = torch.tensor(list(passkey_str.encode('utf-8')), dtype=torch.uint8)
-        p2 = torch.tensor(list(prompt_str.encode('utf-8')), dtype=torch.uint8)
-        
-        seq = torch.cat([noise1, p1, noise2, p2])
+        seq = torch.cat([pattern, sep, noise, trig, pattern])
         x_batch.append(seq[:-1])
         y_batch.append(seq[1:])
         
     x = torch.stack(x_batch).long().to(device)
     y = torch.stack(y_batch).long().to(device)
-    
-    return x, y, keys
+    return x, y
 
-def train_passkey_curriculum():
+def train_copy_curriculum():
     device = torch.device('cuda')
     config = HGDMConfig(d_model=768, n_layers=12, n_heads=12, d_ff=3072, vocab_size=256)
     model = HGDMUltimate(config).to(device)
@@ -64,20 +54,17 @@ def train_passkey_curriculum():
             state_dict["fc_out.weight"] = state_dict.pop("head.weight")
         model.load_state_dict(state_dict, strict=False)
         # The base Enwik8 checkpoint was trained without pos_embedding.
-        # We must zero it out to prevent random noise from destroying the pre-trained byte representations,
-        # and to prevent incorrect absolute position broadcasting during the 1-by-1 generation loop.
         with torch.no_grad():
             model.pos_embedding.zero_()
     else:
         print("WARNING: Checkpoint not found. Training from scratch will fail to learn retrieval.")
     
-    # Lowered LR to 5e-5 for stable fine-tuning of the pre-trained Enwik8 checkpoint
+    # Lowered LR to 5e-5 for stable fine-tuning
     opt = torch.optim.AdamW(model.parameters(), lr=5e-5)
     scaler = torch.amp.GradScaler('cuda')
     
-    print(f"\n{'='*50}\nExp 11: Passkey Retrieval (Context Window Test)\n{'='*50}")
+    print(f"\n{'='*50}\nExp 11: Selective Copy (Context Window Test)\n{'='*50}")
     
-    # Extended curriculum with a mastery phase for deep convergence
     curriculum = [
         (512, 500),
         (1024, 500),
@@ -94,43 +81,51 @@ def train_passkey_curriculum():
             for g in opt.param_groups:
                 g['lr'] = 3e-4
         for step in range(steps):
-            depth = random.uniform(0.1, 0.9)
-            x, y, _ = generate_passkey_data(2, seq_len, depth, device)
+            x, y = generate_copy_data(2, seq_len, device)
             
             opt.zero_grad()
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 logits, _ = model(x)
                 loss_all = nn.CrossEntropyLoss(reduction='none')(logits.view(-1, 256), y.view(-1)).view(2, -1)
                 
-                # Include full sequence loss to stabilize gradients, plus a boost for the passkey
-                loss_passkey = loss_all[:, -1:].mean()
+                # Include full sequence loss to stabilize gradients, plus a boost for the 10-byte pattern
+                loss_pattern = loss_all[:, -10:].mean()
                 loss_seq = loss_all.mean()
-                loss = loss_seq + loss_passkey
+                loss = loss_seq + loss_pattern * 2.0
                 
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
             
             if step % 100 == 0:
-                print(f"Step {step:3d} | Loss Passkey: {loss_passkey.item():.4f} | VRAM: {get_gpu_memory_usage():.0f}MB")
+                print(f"Step {step:3d} | Loss Pattern: {loss_pattern.item():.4f} | VRAM: {get_gpu_memory_usage():.0f}MB")
                 
     print(f"\nCurriculum Training Complete in {time.time() - t_start:.1f}s")
     
     # After training, quick diagnostic test
     model.eval()
-    x, _, keys = generate_passkey_data(1, 512, 0.5, device)
-    target_key = keys[0]
+    x, y = generate_copy_data(1, 512, device)
+    
+    target_pattern = bytes(y[0, -10:].tolist()).decode('utf-8', errors='replace')
+    prompt_tensor = x[:, :-10]
     
     with torch.no_grad():
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-            logits, states = model(x)
-            gen = x
+            logits, states = model(prompt_tensor)
+            gen = prompt_tensor
             next_byte = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
             gen = torch.cat([gen, next_byte], dim=1)
+            for _ in range(9):
+                logits, next_states = model(next_byte, states)
+                states = next_states
+                next_byte = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+                gen = torch.cat([gen, next_byte], dim=1)
+    
+    gen_pattern = bytes(gen[0, -10:].tolist()).decode('utf-8', errors='replace')
     
     print("\n[Diagnostic] Checking if model learned the format:")
-    print(f"Target Passkey: {target_key}")
-    print("Generated:     ", bytes(gen[0, -1:].tolist()).decode(errors='replace'))
+    print(f"Target Pattern: {target_pattern}")
+    print(f"Generated:      {gen_pattern}")
     
     return model
 
@@ -139,66 +134,52 @@ def evaluate_context_window(model):
     model.eval()
     
     test_lengths = [1024, 2048, 4096, 8192, 16384]
-    test_depths = [0.1, 0.5, 0.9]
     trials = 5
     
     results = []
     
-    print("\n--- Evaluating Context Window ---")
+    print("\n--- Evaluating Context Window (Selective Copy) ---")
     
     for L in test_lengths:
-        for depth in test_depths:
-            successes = 0
-            for _ in range(trials):
-                passkey = f"{random.randint(0, 9)}"
-                passkey_str = f" The passkey is {passkey}. "
-                prompt_str = f" What is the passkey? "
-                
-                fixed_len = len(passkey_str) + len(prompt_str)
-                noise_len = max(0, L - fixed_len)
-                pos = int(noise_len * depth)
-                
-                noise1 = torch.randint(97, 123, (pos,), dtype=torch.uint8)
-                noise2 = torch.randint(97, 123, (noise_len - pos,), dtype=torch.uint8)
-                
-                p1 = torch.tensor(list(passkey_str.encode('utf-8')), dtype=torch.uint8)
-                p2 = torch.tensor(list(prompt_str.encode('utf-8')), dtype=torch.uint8)
-                
-                prompt_tensor = torch.cat([noise1, p1, noise2, p2]).long().unsqueeze(0).to(device)
-                
-                with torch.no_grad():
-                    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                        # Pure argmax greedy decoding to avoid sampling noise
-                        generated = prompt_tensor
-                        logits, states = model(prompt_tensor)
+        successes = 0
+        for _ in range(trials):
+            x, y = generate_copy_data(1, L, device)
+            prompt_tensor = x[:, :-10]
+            target_list = y[0, -10:].tolist()
+            
+            with torch.no_grad():
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                    generated = prompt_tensor
+                    logits, states = model(prompt_tensor)
+                    next_byte = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+                    generated = torch.cat([generated, next_byte], dim=1)
+                    for _ in range(9):
+                        logits, next_states = model(next_byte, states)
+                        states = next_states
                         next_byte = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
                         generated = torch.cat([generated, next_byte], dim=1)
                         
-                gen_bytes = generated[0, -1:].cpu().numpy().tolist()
-                try:
-                    gen_str = bytes(gen_bytes).decode('utf-8')
-                except:
-                    gen_str = ""
-                    
-                if gen_str == passkey:
-                    successes += 1
-                elif _ == 0:
-                    # Print the first failure of each depth for debugging
-                    print(f"    [Debug] L={L}, Depth={depth} | Target: {passkey} | Generated: {gen_str}")
-                    
-            acc = successes / trials
-            print(f"L={L:5d} | Depth={depth:.1f} | Accuracy: {acc*100:3.0f}% | VRAM: {get_gpu_memory_usage():.0f}MB")
-            results.append({"length": L, "depth": depth, "accuracy": acc})
+            gen_list = generated[0, -10:].cpu().numpy().tolist()
             
-    return results
-
-def run_experiment():
-    model = train_passkey_curriculum()
-    results = evaluate_context_window(model)
-    
+            if gen_list == target_list:
+                successes += 1
+            elif _ == 0:
+                target_str = bytes(target_list).decode('utf-8', errors='replace')
+                gen_str = bytes(gen_list).decode('utf-8', errors='replace')
+                print(f"    [Debug] L={L} | Target: {target_str} | Generated: {gen_str}")
+                
+        acc = successes / trials
+        print(f"L={L:5d} | Accuracy: {acc*100:3.0f}% | VRAM: {get_gpu_memory_usage():.0f}MB")
+        results.append({"seq_len": L, "accuracy": acc})
+        
     with open("results.json", "w") as f:
         json.dump(results, f, indent=4)
+        
     print("\nExperiment 11 Complete. Saved results.json")
+
+def run_experiment():
+    model = train_copy_curriculum()
+    evaluate_context_window(model)
 
 if __name__ == "__main__":
     run_experiment()
