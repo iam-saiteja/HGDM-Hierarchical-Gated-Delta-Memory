@@ -63,6 +63,11 @@ def train_passkey_curriculum():
         if "head.weight" in state_dict:
             state_dict["fc_out.weight"] = state_dict.pop("head.weight")
         model.load_state_dict(state_dict, strict=False)
+        # The base Enwik8 checkpoint was trained without pos_embedding.
+        # We must zero it out to prevent random noise from destroying the pre-trained byte representations,
+        # and to prevent incorrect absolute position broadcasting during the 1-by-1 generation loop.
+        with torch.no_grad():
+            model.pos_embedding.zero_()
     else:
         print("WARNING: Checkpoint not found. Training from scratch will fail to learn retrieval.")
     
