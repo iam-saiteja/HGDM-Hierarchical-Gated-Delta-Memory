@@ -80,15 +80,32 @@ where \( \mathbf{q}_t \in \mathbb{R}^{d_k} \) is a query projection and \( \math
 
 All operations are parallelised across **multiple heads** (typically 12–28), each with independent gates and memory.
 
-### Multi-Scale Hierarchical Gating
+### Multi-Scale Hierarchical Gating & Continuous-Time Decay
 
-To capture patterns at different timescales, each head is initialised with a different **forget rate** \( \tau \) (timescale). The forget gate bias is set so that the expected value of \( \alpha \) equals \( e^{-1/\tau} \), giving:
+To capture patterns at different timescales, each head is initialised with a different **forget rate** \( \tau \) (timescale). The baseline forget gate bias is set so that the expected value of \( \alpha \) equals \( e^{-1/\tau} \), giving:
 
 - Short‑range heads: \( \tau = 4, 30 \) (fast forgetting, local patterns)
 - Medium‑range heads: \( \tau = 200, 1200 \)
 - Long‑range heads: \( \tau = 8000 \) (slow forgetting, global dependencies)
 
-This **hierarchical initialisation** provides an inductive bias for multi‑scale sequence modelling. The gates remain **trainable**, allowing the model to adapt timescales as needed.
+This **hierarchical initialisation** provides an inductive bias for multi‑scale sequence modelling. 
+
+#### Continuous-Time Variable Gating (Variable-$\Delta t$)
+When the flag `use_variable_delta_t = True` is activated in the configuration, the discrete sigmoid forget gate is replaced by a continuous-time formulation grounded in Neural ODEs:
+\[
+\alpha_t = \exp(-\Delta_t \cdot \lambda)
+\]
+where $\lambda_h = \exp(W_\lambda)$ represent learned decay rates per head (initialized to $1/\tau$), and $\Delta_t = \text{softplus}(W_\delta x_t) + 1\times 10^{-3}$ is a **learnable time duration predicted per-token**. The model can dynamically allocate a small time-step $\Delta_t \approx 0$ (e.g. for punctuation, preserving the state) or a large step $\Delta_t \gg 0$ (e.g. for a paragraph break, decaying the state aggressively).
+
+### Cross-Layer State Fusion (State Highways)
+
+When `use_state_fusion = True` is enabled in `HGDMConfig`, the layers are linked via a **recurrent state highway**. The updated memory state of layer $i-1$ is fused directly into layer $i$ using a lightweight learnable per-head scalar gate $g$ ($L \times H$ parameters total):
+\[
+\mathbf{S}_t^{\text{layer } i} = \mathbf{S}_t^{\text{layer } i} + \text{sigmoid}(g_i) \cdot \mathbf{S}_t^{\text{layer } i-1}
+\]
+This creates a high-fidelity "highway" for the recurrent memory matrix, allowing deeper layers to distill and query the historical patterns stored in earlier layers with **zero speed penalty** and **negligible VRAM overhead**.
+
+---
 
 ### Memory Complexity
 
