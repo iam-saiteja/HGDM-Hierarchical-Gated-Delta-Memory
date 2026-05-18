@@ -56,18 +56,22 @@ def train_passkey_curriculum():
     
     print(f"\n{'='*50}\nExp 11: Passkey Retrieval (Context Window Test)\n{'='*50}")
     
-    # Extended curriculum to ensure convergence from scratch
+    # Extended curriculum with a mastery phase for deep convergence
     curriculum = [
-        (512, 800),
-        (1024, 400),
-        (2048, 400),
-        (4096, 400)
+        (512, 500),
+        (1024, 500),
+        (2048, 500),
+        (4096, 500),
+        (4096, 1000)   # mastery phase
     ]
     
     t_start = time.time()
     
     for seq_len, steps in curriculum:
         print(f"\n--- Curriculum Phase: Seq Len {seq_len} ({steps} steps) ---")
+        if seq_len == 4096 and steps > 500:
+            for g in opt.param_groups:
+                g['lr'] = 3e-4
         for step in range(steps):
             depth = random.uniform(0.1, 0.9)
             x, y = generate_passkey_data(2, seq_len, depth, device)
@@ -89,6 +93,24 @@ def train_passkey_curriculum():
                 print(f"Step {step:3d} | Loss Passkey: {loss_passkey.item():.4f} | VRAM: {get_gpu_memory_usage():.0f}MB")
                 
     print(f"\nCurriculum Training Complete in {time.time() - t_start:.1f}s")
+    
+    # After training, quick diagnostic test
+    model.eval()
+    x, _ = generate_passkey_data(1, 512, 0.5, device)
+    with torch.no_grad():
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            logits, states = model(x)
+            gen = x
+            next_byte = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+            gen = torch.cat([gen, next_byte], dim=1)
+            for _ in range(4):
+                logits, states = model(next_byte, states)
+                next_byte = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+                gen = torch.cat([gen, next_byte], dim=1)
+    
+    print("\n[Diagnostic] Checking if model learned the format:")
+    print("Generated:", bytes(gen[0, -5:].tolist()).decode(errors='replace'))
+    
     return model
 
 def evaluate_context_window(model):
