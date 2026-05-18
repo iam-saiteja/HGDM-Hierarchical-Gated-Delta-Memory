@@ -439,7 +439,7 @@ All experiments are executed on a single NVIDIA RTX 3090\,Ti GPU (24\,GB VRAM). 
 We employ the AdamW optimizer with hyperparameters configured to $\beta_1=0.9$, $\beta_2=0.999$, and $\epsilon=10^{-8}$. The peak training learning rate is set to $4 \times 10^{-4}$.
 
 \subsection{Regularization}
-We apply a weight decay coefficient of $0.01$ across all non-bias parameters. Pre-activation RMSNorm layers with an added epsilon of $10^{-6}$ stabilize the optimization trajectory, and a dropout rate of $0.1$ is applied to the feed-forward outputs.
+We apply a weight decay coefficient of $0.01$ across all non-bias parameters. Pre-activation RMSNorm layers with an added epsilon of $10^{-8}$ stabilize the optimization trajectory, and a dropout rate of $0.1$ is applied to the feed-forward outputs.
 
 % ─── 9. Experimental Results ──────────────────────────────────────────────────
 \section{Experimental Results}
