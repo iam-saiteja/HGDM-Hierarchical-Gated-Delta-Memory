@@ -38,12 +38,12 @@
 HGDM (Hierarchical Gated Delta Memory) is a novel attention‑free neural network architecture for sequence modeling. It replaces the quadratic self‑attention of Transformers with a **gated multiplicative recurrent state** that maintains a fixed‑size memory matrix. This design enables:
 
 - **Linear memory scaling** with sequence length (vs. quadratic for attention)
-- **Single‑consumer‑GPU training** of 1.1 B-parameter models
+- **Single‑consumer‑GPU training** capacity for massive scaling (current validation at 120M parameters)
 - **Native byte‑level processing** without tokenization
 - **Modality‑agnostic learning** (text, images, audio, video from raw bytes)
 - **Stable long‑range generation** beyond 100k steps
 
-The repository includes a complete training pipeline, custom fused Triton kernels, and a comprehensive experimental suite proving the architecture’s advantages.
+The repository includes a complete training pipeline, custom fused Triton kernels, and a comprehensive experimental suite demonstrating the architecture’s empirical performance.
 
 ---
 
@@ -314,14 +314,14 @@ All experiments were conducted on a single NVIDIA RTX 3090 Ti (24 GB). Models 
 - State norm grows smoothly and linearly from 2.0 to ~67,000, no explosion.
 - VRAM stays constant at **1124 MB** for the entire process.
 
-**Proof:** HGDM’s recurrent state is stable and bounded, suitable for future infinite‑context applications.
+**Demonstration:** HGDM’s recurrent state is stable and bounded, suitable for future infinite‑context applications.
 
 ---
 
 ## Repository Structure
 
 ```
-hgdm/
+HTSPC-H3/
 ├── hgdm_ultimate.py          # Core architecture (HGDMConfig, HGDMUltimate, layers)
 ├── kernel_nitro.py           # V7 Nitro Triton kernel (forward + backward)
 ├── simulations/
@@ -336,7 +336,6 @@ hgdm/
 │   ├── exp9_long_gating/     # Long gating at 4096
 │   ├── exp10_state_stability/ # 100k token stress test
 │   └── utils.py               # Helpers (Transformer baseline, GPU monitoring)
-├── results/                  # Aggregated results.json files
 └── README.md                  # This document
 ```
 
@@ -344,11 +343,11 @@ hgdm/
 
 ## Getting Started
 
-**Requirements:** Python≥3.10, PyTorch≥2.5, Triton≥3.0, bitsandbytes, datasets.
+**Requirements:** Python≥3.10, PyTorch≥2.5, Triton≥3.0, matplotlib.
 
 **Installation:**
 ```bash
-pip install torch triton bitsandbytes datasets matplotlib
+pip install torch triton matplotlib
 ```
 
 **Run an experiment (e.g. Exp 1):**
