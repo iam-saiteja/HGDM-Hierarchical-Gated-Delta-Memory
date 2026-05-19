@@ -15,17 +15,33 @@ class NaNDetectedException(Exception):
     """Custom exception raised when NaN or Inf values are detected in the loss."""
     pass
 
-def get_gpu_memory():
-    """Queries PyTorch for active memory utilization (sub-microsecond execution time)."""
+# Global caches for GPU metrics to avoid hot-loop subprocess overhead
+cached_gpu_mem = "N/A"
+cached_temp = "N/A"
+
+def update_gpu_metrics():
+    """Queries nvidia-smi for active VRAM and temperature metrics to update cache."""
+    global cached_gpu_mem, cached_temp
     try:
-        mem_mb = torch.cuda.memory_allocated() / (1024**2)
-        return f"{mem_mb:.1f}MB"
+        cmd = "nvidia-smi --query-gpu=memory.used,temperature.gpu --format=csv,noheader,nounits"
+        output = subprocess.check_output(cmd, shell=True).decode().strip()
+        mem, temp = output.split(',')
+        cached_gpu_mem = f"{mem.strip()}MB"
+        cached_temp = f"{temp.strip()}C"
     except:
-        return "N/A"
+        pass
+
+def get_gpu_memory():
+    """Returns the cached nvidia-smi VRAM metric."""
+    global cached_gpu_mem
+    return cached_gpu_mem
 
 def train_1b_cluster():
     device = torch.device('cuda')
     assert torch.cuda.is_available(), "RTX 3090 Ti CUDA Environment Not Found."
+    
+    # Initialize metric cache at startup
+    update_gpu_metrics()
     
     # -------------------------------------------------------------------------
     # 1. SCALE CONFIGURATION TO 1 BILLION PARAMETERS
@@ -51,7 +67,7 @@ def train_1b_cluster():
     param_count = sum(p.numel() for p in model.parameters())
     print(f"[Model] Natively compiled 1B Target Architecture.")
     print(f"[Model] Total Parameter Count: {param_count / 1e9:.3f} Billion")
-    print(f"[Memory] Baseline Allocated VRAM: {torch.cuda.memory_allocated() / 1024**2:.1f} MB")
+    print(f"[Memory] Baseline Allocated VRAM (nvidia-smi): {get_gpu_memory()}")
     
     # -------------------------------------------------------------------------
     # 2. OPTIMIZER & PIPELINE SETUP
@@ -62,6 +78,10 @@ def train_1b_cluster():
     block_size = 2048
     batch_size = 2
     grad_accum_steps = 16  # Effective Batch Size = 2 * 16 * 2048 = 65,536 tokens per update
+    max_steps = 100000
+    
+    # Cosine Annealing Learning Rate Scheduler for quality convergence
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max_steps, eta_min=1e-5)
     
     dataloader = get_1b_dataloader(block_size=block_size, batch_size=batch_size)
     data_stream = iter(dataloader)
@@ -81,6 +101,8 @@ def train_1b_cluster():
             checkpoint = torch.load(checkpoint_path, map_location="cpu")
             model.load_state_dict(checkpoint['model_state_dict'])
             opt.load_state_dict(checkpoint['optimizer_state_dict'])
+            if 'scheduler_state_dict' in checkpoint:
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             start_step = checkpoint['step']
             tokens_trained = checkpoint.get('tokens_trained', start_step * batch_size * block_size * grad_accum_steps)
             print(f"[System] Resumed successfully from Step {start_step} | Tokens trained: {tokens_trained:,}")
@@ -122,7 +144,6 @@ def train_1b_cluster():
     # -------------------------------------------------------------------------
     # 4. MONITORING AND LOG BUFFER CONTROLS
     # -------------------------------------------------------------------------
-    cached_temp = "N/A"
     log_buffer = []
     
     def flush_logs():
@@ -142,6 +163,7 @@ def train_1b_cluster():
         state = {
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': opt.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
             'step': current_step,
             'tokens_trained': current_tokens
         }
@@ -157,7 +179,6 @@ def train_1b_cluster():
     # 5. TRAINING LOOP
     # -------------------------------------------------------------------------
     step = start_step
-    max_steps = 100000
     
     try:
         while step < max_steps:
@@ -189,6 +210,7 @@ def train_1b_cluster():
             # Anchor gradients to prevent scale explosions
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
+            scheduler.step()
             
             step_time = time.time() - t_step_start
             tokens_trained += batch_size * block_size * grad_accum_steps
@@ -213,24 +235,27 @@ def train_1b_cluster():
             # - First 100 steps: Print every 25 steps (0, 25, 50, 75, 100)
             # - After 100 steps: Print every 100 steps
             is_print_step = (step <= 100 and step % 25 == 0) or (step > 100 and step % 100 == 0)
+            
+            # Update nvidia-smi cache only on print or checkpoint steps (prevents hot-loop bottlenecks)
+            if is_print_step or (step > 0 and step % 100 == 0):
+                update_gpu_metrics()
+                
             if is_print_step:
-                print(f"Step {step:5d} | Train Loss: {accum_loss:.4f} | BPB: {bpb:.4f} | Tokens Trained: {tokens_trained:,} | VRAM: {get_gpu_memory()} (Temp: {cached_temp}C) | Time: {step_time:.2f}s")
+                print(f"Step {step:5d} | Train Loss: {accum_loss:.4f} | BPB: {bpb:.4f} | Tokens Trained: {tokens_trained:,} | VRAM: {get_gpu_memory()} (Temp: {cached_temp}) | Time: {step_time:.2f}s")
             
             # Save checkpoint and perform thermal safety check every 100 steps
             if step > 0 and step % 100 == 0:
                 save_checkpoint(step, tokens_trained)
                 flush_logs()
                 
-                # Query GPU temperature (infrequent, zero-overhead checkpoint boundary check)
+                # Check thermals using cached temperature
                 try:
-                    cmd = "nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits"
-                    output = subprocess.check_output(cmd, shell=True).decode().strip()
-                    gpu_temp = int(output)
-                    cached_temp = str(gpu_temp)
-                    
+                    gpu_temp = int(cached_temp.replace('C', ''))
                     if gpu_temp >= 95:
                         print(f"\n[THERMAL CONTROL] GPU temperature hit {gpu_temp}C (>= 95C). Sleeping for 180 seconds to cool down...")
                         time.sleep(180)
+                        # Re-update metrics after sleep
+                        update_gpu_metrics()
                 except:
                     pass
                     
