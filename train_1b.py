@@ -77,6 +77,7 @@ def train_1b_cluster():
         x = batch[:, :-1]
         y = batch[:, 1:]
         
+        t_step_start = time.time()
         try:
             # Forward pass wrapped under native bfloat16 autocast
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
@@ -91,9 +92,9 @@ def train_1b_cluster():
             
             opt.step()
             
-            if step % 10 == 0 or step == 1:
-                bpb = loss.item() / math.log(2)
-                print(f"Step {step:5d} | Train Loss: {loss.item():.4f} | BPB: {bpb:.4f} | VRAM: {get_gpu_memory()}")
+            step_time = time.time() - t_step_start
+            bpb = loss.item() / math.log(2)
+            print(f"Step {step:5d} | Train Loss: {loss.item():.4f} | BPB: {bpb:.4f} | VRAM: {get_gpu_memory()} | Time: {step_time:.2f}s")
                 
             # Perform regular saving checkpoints
             if step > 0 and step % 1000 == 0:
@@ -101,11 +102,6 @@ def train_1b_cluster():
                 print(f"[System] Checkpoint saved successfully at step {step}.")
                 
             step += 1
-            
-            # Thermal check to protect the local environment
-            if step % 50 == 0:
-                # Basic sleep check if hardware thermals scale too aggressively
-                pass
                 
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
