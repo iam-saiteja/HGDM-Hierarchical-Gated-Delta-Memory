@@ -7,6 +7,7 @@ import subprocess
 import math
 import json
 import sys
+import itertools
 from hgdm_ultimate import HGDMUltimate, HGDMConfig
 from data_1b import get_1b_dataloader
 
@@ -47,7 +48,8 @@ def train_1b_cluster():
     print("[Dataset] Mixture Proportions: 60% FineWeb-Edu, 25% English Wikipedia, 15% Clean Code")
     
     model = HGDMUltimate(config).to(device)
-    model.training = True 
+    # Ensure correct mode is propagated to submodules
+    model.train() 
     
     param_count = sum(p.numel() for p in model.parameters())
     print(f"[Model] Natively compiled 1B Target Architecture.")
@@ -62,18 +64,19 @@ def train_1b_cluster():
     # Block size 2048, batch size 2
     block_size = 2048
     batch_size = 2
+    grad_accum_steps = 16  # Effective Batch Size = 2 * 16 * 2048 = 65,536 tokens per update
+    
     dataloader = get_1b_dataloader(block_size=block_size, batch_size=batch_size)
     data_stream = iter(dataloader)
     
     # -------------------------------------------------------------------------
-    # 3. AUTO-RESUME CHECKPOINT LOADING
+    # 3. AUTO-RESUME CHECKPOINT & JSONL LOG LOADING
     # -------------------------------------------------------------------------
     checkpoint_path = "hgdm_1b_latest.pt"
-    log_json_path = "train_1b_logs.json"
+    log_jsonl_path = "train_1b_logs.jsonl"
     
     start_step = 0
     tokens_trained = 0
-    logs = []
     
     if os.path.exists(checkpoint_path):
         print(f"[System] Found existing checkpoint at {checkpoint_path}. Resuming training...")
@@ -82,32 +85,38 @@ def train_1b_cluster():
             model.load_state_dict(checkpoint['model_state_dict'])
             opt.load_state_dict(checkpoint['optimizer_state_dict'])
             start_step = checkpoint['step']
-            tokens_trained = checkpoint.get('tokens_trained', start_step * batch_size * block_size)
+            tokens_trained = checkpoint.get('tokens_trained', start_step * batch_size * block_size * grad_accum_steps)
             print(f"[System] Resumed successfully from Step {start_step} | Tokens trained: {tokens_trained:,}")
         except Exception as e:
             print(f"[System] Error loading checkpoint: {e}. Starting from scratch.")
             start_step = 0
             tokens_trained = 0
             
-    if os.path.exists(log_json_path):
+    # Prune JSONL logs up to the start_step to maintain clean history on resume
+    if os.path.exists(log_jsonl_path):
         try:
-            with open(log_json_path, "r") as f:
-                logs = json.load(f)
-            # Filter logs up to start_step to keep history clean on resume
-            logs = [l for l in logs if l.get('step', 0) < start_step]
-            print(f"[System] Loaded {len(logs)} historic log entries from JSON.")
-        except Exception as e:
-            print(f"[System] Error loading JSON logs: {e}. Resetting log file.")
-            logs = []
+            valid_entries = []
+            with open(log_jsonl_path, "r") as f:
+                for line in f:
+                    if line.strip():
+                        entry = json.loads(line)
+                        if entry.get('step', 0) < start_step:
+                            valid_entries.append(entry)
             
-    # Fast-forward streaming data loader to current step
+            # Rewrite clean history
+            with open(log_jsonl_path, "w") as f:
+                for entry in valid_entries:
+                    f.write(json.dumps(entry) + "\n")
+            print(f"[System] Pruned JSONL log file to step {start_step} ({len(valid_entries)} history logs retained).")
+        except Exception as e:
+            print(f"[System] Error reading/pruning JSONL logs: {e}. Resetting log file.")
+            
+    # Fast-forward streaming data loader using itertools.islice (extremely fast C-level iterator skip)
     if start_step > 0:
         print(f"[Dataset] Fast-forwarding streaming data loader to step {start_step}...")
         t_ff_start = time.time()
-        for ff_step in range(start_step):
-            _ = next(data_stream)
-            if ff_step > 0 and ff_step % 500 == 0:
-                print(f"[Dataset] Fast-forwarded {ff_step}/{start_step} batches...")
+        batches_to_skip = start_step * grad_accum_steps
+        data_stream = itertools.islice(data_stream, batches_to_skip, None)
         print(f"[Dataset] Fast-forward complete in {time.time() - t_ff_start:.2f}s.")
         
     print("[Optimizer] Initializing standard AdamW state vectors on-device...")
@@ -138,55 +147,56 @@ def train_1b_cluster():
     try:
         while step < max_steps:
             opt.zero_grad(set_to_none=True)
-            
-            # Load next batch
-            batch = next(data_stream).to(device)
-            x = batch[:, :-1]
-            y = batch[:, 1:]
+            accum_loss = 0.0
             
             t_step_start = time.time()
             
-            # Forward pass wrapped under native bfloat16 autocast
-            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                logits, _ = model(x)
-                loss = F.cross_entropy(logits.view(-1, 256), y.view(-1))
-            
-            # Check for NaN loss
-            if torch.isnan(loss) or torch.isinf(loss):
-                raise NaNDetectedException(f"NaN or Inf loss detected at Step {step}!")
+            # Gradient Accumulation Loop
+            for accum_step in range(grad_accum_steps):
+                batch = next(data_stream).to(device)
+                x = batch[:, :-1]
+                y = batch[:, 1:]
                 
-            # Backward pass with gradient checkpointing recomputation
-            loss.backward()
+                # Forward pass wrapped under native bfloat16 autocast
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                    logits, _ = model(x)
+                    # Divide loss by grad_accum_steps to average gradients correctly
+                    loss = F.cross_entropy(logits.view(-1, 256), y.view(-1)) / grad_accum_steps
+                
+                # Check for NaN loss
+                if torch.isnan(loss) or torch.isinf(loss):
+                    raise NaNDetectedException(f"NaN or Inf loss detected at Step {step} during accum step {accum_step}!")
+                    
+                # Accumulate gradients
+                loss.backward()
+                accum_loss += loss.item() * grad_accum_steps
             
             # Anchor gradients to prevent scale explosions
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             
             step_time = time.time() - t_step_start
-            tokens_trained += batch_size * block_size
-            bpb = loss.item() / math.log(2)
+            tokens_trained += batch_size * block_size * grad_accum_steps
+            bpb = accum_loss / math.log(2)
             
-            # Log step metrics to memory list and serialize to JSON
+            # Log step metrics to append-only JSONL file (O(1) I/O write)
             log_entry = {
                 "step": step,
-                "loss": loss.item(),
+                "loss": accum_loss,
                 "bpb": bpb,
                 "vram": get_gpu_memory(),
                 "time": step_time,
                 "tokens_trained": tokens_trained
             }
-            logs.append(log_entry)
-            
-            # Write JSON log file
-            with open(log_json_path, "w") as f:
-                json.dump(logs, f, indent=4)
+            with open(log_jsonl_path, "a") as f:
+                f.write(json.dumps(log_entry) + "\n")
                 
             # Print frequency control:
             # - First 100 steps: Print every 25 steps (0, 25, 50, 75, 100)
             # - After 100 steps: Print every 100 steps
             is_print_step = (step <= 100 and step % 25 == 0) or (step > 100 and step % 100 == 0)
             if is_print_step:
-                print(f"Step {step:5d} | Train Loss: {loss.item():.4f} | BPB: {bpb:.4f} | Tokens Trained: {tokens_trained:,} | VRAM: {get_gpu_memory()} | Time: {step_time:.2f}s")
+                print(f"Step {step:5d} | Train Loss: {accum_loss:.4f} | BPB: {bpb:.4f} | Tokens Trained: {tokens_trained:,} | VRAM: {get_gpu_memory()} | Time: {step_time:.2f}s")
             
             # Save checkpoint every 100 steps, overwriting the existing checkpoint file
             if step > 0 and step % 100 == 0:

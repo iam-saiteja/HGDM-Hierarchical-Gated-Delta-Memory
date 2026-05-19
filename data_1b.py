@@ -8,11 +8,11 @@ class MultiSourceChunkedByteDataset(IterableDataset):
         self.block_size = block_size
         self.ratios = torch.tensor([fineweb_ratio, wiki_ratio, code_ratio])
         
-        # Stream sources directly from Hugging Face
-        print("[Dataset] Initializing streaming data pipelines...")
+        # Stream sources directly from Hugging Face (using training splits)
+        print("[Dataset] Initializing streaming data pipelines (Training Splits)...")
         self.fineweb = load_dataset("HuggingFaceFW/fineweb-edu", "sample-10BT", split="train", streaming=True)
-        self.wiki = load_dataset("carlosejimenez/wikipedia-20220301.en-0.005-validation", split="validation", streaming=True)
-        self.code = load_dataset("codeparrot/codeparrot-clean-valid", split="validation", streaming=True)
+        self.wiki = load_dataset("wikimedia/wikipedia", "20231101.en", split="train", streaming=True)
+        self.code = load_dataset("codeparrot/codeparrot-clean", split="train", streaming=True)
 
     def __iter__(self):
         fw_iter = iter(self.fineweb)
@@ -35,6 +35,10 @@ class MultiSourceChunkedByteDataset(IterableDataset):
                 # Encode straight to raw UTF-8 integer bytes
                 raw_bytes = list(text.encode('utf-8', errors='ignore'))
                 buffer.extend(raw_bytes)
+                
+                # Buffer growth guard: cap buffer size to avoid potential memory leak on giant documents
+                if len(buffer) > 10_000_000:
+                    buffer = buffer[-(self.block_size + 1):]
                 
                 # Drain the buffer into fixed-size context blocks
                 while len(buffer) >= self.block_size + 1:
