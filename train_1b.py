@@ -10,6 +10,10 @@ import sys
 from hgdm_ultimate import HGDMUltimate, HGDMConfig
 from data_1b import get_1b_dataloader
 
+class NaNDetectedException(Exception):
+    """Custom exception raised when NaN or Inf values are detected in the loss."""
+    pass
+
 def get_gpu_memory():
     """Queries nvidia-smi for active VRAM utilization metrics."""
     try:
@@ -149,9 +153,7 @@ def train_1b_cluster():
             
             # Check for NaN loss
             if torch.isnan(loss) or torch.isinf(loss):
-                print(f"\n[CRITICAL] NaN or Inf loss detected at Step {step}! Stopping training to prevent weight corruption.")
-                save_checkpoint(step, tokens_trained)
-                sys.exit(1)
+                raise NaNDetectedException(f"NaN or Inf loss detected at Step {step}!")
                 
             # Backward pass with gradient checkpointing recomputation
             loss.backward()
@@ -193,6 +195,10 @@ def train_1b_cluster():
                 
             step += 1
             
+    except NaNDetectedException as e:
+        print(f"\n[CRITICAL ERROR] {e} Stopping training immediately. Checkpoint was NOT saved/updated to prevent weight corruption.")
+        sys.exit(1)
+        
     except (KeyboardInterrupt, SystemExit):
         print(f"\n[System] Training interrupted/stopped. Saving current state to {checkpoint_path}...")
         save_checkpoint(step, tokens_trained)
