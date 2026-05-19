@@ -16,12 +16,10 @@ class NaNDetectedException(Exception):
     pass
 
 def get_gpu_memory():
-    """Queries nvidia-smi for active VRAM utilization metrics."""
+    """Queries PyTorch for active memory utilization (sub-microsecond execution time)."""
     try:
-        cmd = "nvidia-smi --query-gpu=memory.used,temperature.gpu --format=csv,noheader,nounits"
-        output = subprocess.check_output(cmd, shell=True).decode().strip()
-        mem, temp = output.split(',')
-        return f"{mem.strip()}MB | Temp: {temp.strip()}C"
+        mem_mb = torch.cuda.memory_allocated() / (1024**2)
+        return f"{mem_mb:.1f}MB"
     except:
         return "N/A"
 
@@ -48,7 +46,6 @@ def train_1b_cluster():
     print("[Dataset] Mixture Proportions: 60% FineWeb-Edu, 25% English Wikipedia, 15% Clean Code")
     
     model = HGDMUltimate(config).to(device)
-    # Ensure correct mode is propagated to submodules
     model.train() 
     
     param_count = sum(p.numel() for p in model.parameters())
@@ -70,7 +67,7 @@ def train_1b_cluster():
     data_stream = iter(dataloader)
     
     # -------------------------------------------------------------------------
-    # 3. AUTO-RESUME CHECKPOINT & JSONL LOG LOADING
+    # 3. AUTO-RESUME CHECKPOINT & LOGS LOADING
     # -------------------------------------------------------------------------
     checkpoint_path = "hgdm_1b_latest.pt"
     log_jsonl_path = "train_1b_logs.jsonl"
@@ -122,6 +119,24 @@ def train_1b_cluster():
     print("[Optimizer] Initializing standard AdamW state vectors on-device...")
     t_start = time.time()
     
+    # -------------------------------------------------------------------------
+    # 4. MONITORING AND LOG BUFFER CONTROLS
+    # -------------------------------------------------------------------------
+    cached_temp = "N/A"
+    log_buffer = []
+    
+    def flush_logs():
+        """Flushes the buffered JSONL logs to disk in a single batch I/O write."""
+        nonlocal log_buffer
+        if log_buffer:
+            try:
+                with open(log_jsonl_path, "a") as f:
+                    for entry in log_buffer:
+                        f.write(json.dumps(entry) + "\n")
+                log_buffer.clear()
+            except Exception as e:
+                print(f"[System] Error flushing logs: {e}")
+
     # Helper to save checkpoint securely
     def save_checkpoint(current_step, current_tokens):
         state = {
@@ -139,7 +154,7 @@ def train_1b_cluster():
             os.rename(tmp_path, checkpoint_path)
 
     # -------------------------------------------------------------------------
-    # 4. TRAINING LOOP STEP
+    # 5. TRAINING LOOP
     # -------------------------------------------------------------------------
     step = start_step
     max_steps = 100000
@@ -179,7 +194,7 @@ def train_1b_cluster():
             tokens_trained += batch_size * block_size * grad_accum_steps
             bpb = accum_loss / math.log(2)
             
-            # Log step metrics to append-only JSONL file (O(1) I/O write)
+            # Buffer log entries in memory (reduces I/O overhead)
             log_entry = {
                 "step": step,
                 "loss": accum_loss,
@@ -188,49 +203,60 @@ def train_1b_cluster():
                 "time": step_time,
                 "tokens_trained": tokens_trained
             }
-            with open(log_jsonl_path, "a") as f:
-                f.write(json.dumps(log_entry) + "\n")
+            log_buffer.append(log_entry)
+            
+            # Flush log buffer to file every 10 steps
+            if len(log_buffer) >= 10:
+                flush_logs()
                 
             # Print frequency control:
             # - First 100 steps: Print every 25 steps (0, 25, 50, 75, 100)
             # - After 100 steps: Print every 100 steps
             is_print_step = (step <= 100 and step % 25 == 0) or (step > 100 and step % 100 == 0)
             if is_print_step:
-                print(f"Step {step:5d} | Train Loss: {accum_loss:.4f} | BPB: {bpb:.4f} | Tokens Trained: {tokens_trained:,} | VRAM: {get_gpu_memory()} | Time: {step_time:.2f}s")
+                print(f"Step {step:5d} | Train Loss: {accum_loss:.4f} | BPB: {bpb:.4f} | Tokens Trained: {tokens_trained:,} | VRAM: {get_gpu_memory()} (Temp: {cached_temp}C) | Time: {step_time:.2f}s")
             
-            # Save checkpoint every 100 steps, overwriting the existing checkpoint file
+            # Save checkpoint and perform thermal safety check every 100 steps
             if step > 0 and step % 100 == 0:
                 save_checkpoint(step, tokens_trained)
-                print(f"[System] Checkpoint saved successfully (overwritten) at step {step}.")
+                flush_logs()
                 
-            step += 1
-            
-            # Thermal check to protect the local environment (cool down if >= 95C)
-            if step % 5 == 0:
+                # Query GPU temperature (infrequent, zero-overhead checkpoint boundary check)
                 try:
                     cmd = "nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits"
                     output = subprocess.check_output(cmd, shell=True).decode().strip()
                     gpu_temp = int(output)
+                    cached_temp = str(gpu_temp)
+                    
                     if gpu_temp >= 95:
                         print(f"\n[THERMAL CONTROL] GPU temperature hit {gpu_temp}C (>= 95C). Sleeping for 180 seconds to cool down...")
                         time.sleep(180)
                 except:
                     pass
+                    
+                print(f"[System] Checkpoint and logs saved successfully (overwritten) at step {step}.")
+                
+            step += 1
             
     except NaNDetectedException as e:
+        flush_logs()
         print(f"\n[CRITICAL ERROR] {e} Stopping training immediately. Checkpoint was NOT saved/updated to prevent weight corruption.")
         sys.exit(1)
         
     except (KeyboardInterrupt, SystemExit):
         print(f"\n[System] Training interrupted/stopped. Saving current state to {checkpoint_path}...")
+        flush_logs()
         save_checkpoint(step, tokens_trained)
         print("[System] Save complete. Exiting.")
         
     except Exception as e:
         print(f"\n[System] Unexpected error encountered: {e}. Saving state before crash...")
+        flush_logs()
         save_checkpoint(step, tokens_trained)
         raise e
 
+    # Flush final logs before script termination
+    flush_logs()
     print(f"Training run completed in {(time.time() - t_start)/3600:.2f} hours.")
 
 if __name__ == "__main__":
