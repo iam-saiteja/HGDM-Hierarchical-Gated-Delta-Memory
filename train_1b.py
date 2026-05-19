@@ -195,6 +195,18 @@ def train_1b_cluster():
                 
             step += 1
             
+            # Thermal check to protect the local environment (cool down if >= 95C)
+            if step % 5 == 0:
+                try:
+                    cmd = "nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits"
+                    output = subprocess.check_output(cmd, shell=True).decode().strip()
+                    gpu_temp = int(output)
+                    if gpu_temp >= 95:
+                        print(f"\n[THERMAL CONTROL] GPU temperature hit {gpu_temp}C (>= 95C). Sleeping for 180 seconds to cool down...")
+                        time.sleep(180)
+                except:
+                    pass
+            
     except NaNDetectedException as e:
         print(f"\n[CRITICAL ERROR] {e} Stopping training immediately. Checkpoint was NOT saved/updated to prevent weight corruption.")
         sys.exit(1)
