@@ -44,6 +44,28 @@ def train_1b_cluster():
     update_gpu_metrics()
     
     # -------------------------------------------------------------------------
+    # 0. DATASET SPLIT & STREAM PRE-START VERIFICATION
+    # -------------------------------------------------------------------------
+    print("[Dataset] Running dataset split pre-start verification...")
+    from datasets import load_dataset
+    try:
+        # Load a single sample from each stream to verify connection and split configuration
+        fw_sample = next(iter(load_dataset("HuggingFaceFW/fineweb-edu", "sample-10BT", split="train", streaming=True)))
+        print(f"[Dataset] FineWeb-Edu train split verified successfully! Sample text len: {len(fw_sample.get('text', ''))}")
+        
+        wiki_sample = next(iter(load_dataset("wikimedia/wikipedia", "20231101.en", split="train", streaming=True)))
+        print(f"[Dataset] Wikipedia train split verified successfully! Sample title: {wiki_sample.get('title', 'N/A')}")
+        
+        code_sample = next(iter(load_dataset("codeparrot/codeparrot-clean", split="train", streaming=True)))
+        print(f"[Dataset] CodeParrot-clean train split verified successfully! Sample content len: {len(code_sample.get('content', ''))}")
+        
+        print("[Dataset] All streaming pipelines successfully connected and verified!")
+    except Exception as e:
+        print(f"\n[CRITICAL ERROR] Dataset verification failed: {e}")
+        print("Please check your network connection, dataset repositories, and Hugging Face access.")
+        sys.exit(1)
+    
+    # -------------------------------------------------------------------------
     # 1. SCALE CONFIGURATION TO 1 BILLION PARAMETERS
     # -------------------------------------------------------------------------
     config = HGDMConfig(
