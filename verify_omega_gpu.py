@@ -1,5 +1,10 @@
 import torch
 import torch.nn as nn
+
+# Disable TF32 on Ampere GPUs to verify exact math equivalence without hardware truncation
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+
 from hgdm_omega import OmegaConfig, OmegaGDM
 
 def verify_omega_gpu():
