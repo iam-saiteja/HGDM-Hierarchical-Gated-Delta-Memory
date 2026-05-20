@@ -257,9 +257,9 @@ def main():
     print(f"[Memory]  Initial Total VRAM Used (nvidia-smi): {get_net_gpu_memory()}MB")
 
     max_steps = 2000
-    grad_accum_steps = 8
-    batch_size = 4      # Scaled up: full GPU now free
-    block_size = 2048   # Scaled up: full context window
+    grad_accum_steps = 4   # Reduced: batch_size doubled, same effective tokens
+    batch_size = 8         # Doubled: fills the full 24GB GPU
+    block_size = 2048      # Full context window
 
     # -------------------------------------------------------------------------
     # 2. TRAIN HGDM (Previous) — 1000 steps on a fresh stream
