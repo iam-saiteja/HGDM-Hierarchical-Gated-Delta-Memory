@@ -92,7 +92,7 @@ def train_omega_100steps():
             # Forward pass with mixed precision autocast
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 logits, _ = model(x)
-                loss = F.cross_entropy(logits.view(-1, 256), y.view(-1)) / grad_accum_steps
+                loss = F.cross_entropy(logits.reshape(-1, 256), y.reshape(-1)) / grad_accum_steps
                 
             loss.backward()
             accum_loss += loss.item() * grad_accum_steps

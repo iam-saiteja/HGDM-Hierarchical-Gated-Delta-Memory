@@ -219,7 +219,7 @@ def train_1b_cluster():
                 with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                     logits, _ = model(x)
                     # Divide loss by grad_accum_steps to average gradients correctly
-                    loss = F.cross_entropy(logits.view(-1, 256), y.view(-1)) / grad_accum_steps
+                    loss = F.cross_entropy(logits.reshape(-1, 256), y.reshape(-1)) / grad_accum_steps
                 
                 # Check for NaN loss
                 if torch.isnan(loss) or torch.isinf(loss):
