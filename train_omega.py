@@ -7,7 +7,11 @@ import subprocess
 import math
 import json
 import sys
+import os
 import argparse
+
+# Explicitly add current directory to path to fix module resolution
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import OmegaGDM
 from hgdm_omega import OmegaGDM, OmegaConfig
