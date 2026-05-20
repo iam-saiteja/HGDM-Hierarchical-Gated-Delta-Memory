@@ -8,12 +8,123 @@ import math
 import json
 import sys
 import argparse
+
+# Import OmegaGDM
 from hgdm_omega import OmegaGDM, OmegaConfig
-from data_1b import get_1b_dataloader
+
+# Import dataloader from the new one_billion folder
+from one_billion.data_1b import get_1b_dataloader
 
 # =============================================================================
-# OMEGAGDM V2 — TRAINING + INFERENCE
-# Config kept identical to the HGDM baseline run for fair comparison.
+# OPTIMIZED STANDARD TRANSFORMER BASELINE (LLaMA-3 Style)
+# =============================================================================
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        norm = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return norm * self.weight
+
+class TransformerLayer(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        
+        self.norm1 = RMSNorm(d_model)
+        self.wq = nn.Linear(d_model, d_model, bias=False)
+        self.wk = nn.Linear(d_model, d_model, bias=False)
+        self.wv = nn.Linear(d_model, d_model, bias=False)
+        self.wo = nn.Linear(d_model, d_model, bias=False)
+        
+        self.norm2 = RMSNorm(d_model)
+        # SwiGLU FFN: 8/3 * d_model
+        hidden_dim = int(8 * d_model / 3)
+        self.w1 = nn.Linear(d_model, hidden_dim, bias=False)
+        self.w2 = nn.Linear(hidden_dim, d_model, bias=False)
+        self.w3 = nn.Linear(d_model, hidden_dim, bias=False)
+
+    def forward(self, x, cos, sin):
+        B, T, C = x.shape
+        
+        hx = self.norm1(x)
+        q = self.wq(hx).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.wk(hx).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.wv(hx).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        
+        # RoPE Application
+        q = (q * cos) + (self.rotate_half(q) * sin)
+        k = (k * cos) + (self.rotate_half(k) * sin)
+        
+        # FlashAttention (SDPA)
+        attn_out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, C)
+        x = x + self.wo(attn_out)
+        
+        # SwiGLU FFN
+        hx = self.norm2(x)
+        swish = F.silu(self.w1(hx))
+        hx = swish * self.w3(hx)
+        x = x + self.w2(hx)
+        
+        return x
+        
+    def rotate_half(self, x):
+        x1 = x[..., :self.head_dim//2]
+        x2 = x[..., self.head_dim//2:]
+        return torch.cat((-x2, x1), dim=-1)
+
+class TopTransformer(nn.Module):
+    def __init__(self, vocab_size=256, d_model=1024, n_layers=12, n_heads=16, max_seq_len=2048):
+        super().__init__()
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.layers = nn.ModuleList([TransformerLayer(d_model, n_heads) for _ in range(n_layers)])
+        self.norm = RMSNorm(d_model)
+        self.fc_out = nn.Linear(d_model, vocab_size, bias=False)
+        self.fc_out.weight = self.embed.weight
+        
+        # Precompute RoPE frequencies
+        theta = 10000.0 ** (-2.0 * (torch.arange(0, self.head_dim, 2).float() / self.head_dim))
+        m = torch.arange(max_seq_len)
+        freqs = torch.outer(m, theta)
+        freqs_cis = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer("cos", freqs_cis.cos()[None, None, :, :])
+        self.register_buffer("sin", freqs_cis.sin()[None, None, :, :])
+
+    def forward(self, x):
+        B, T = x.shape
+        h = self.embed(x)
+        cos = self.cos[:, :, :T, :]
+        sin = self.sin[:, :, :T, :]
+        
+        for layer in self.layers:
+            h = layer(h, cos, sin)
+            
+        h = self.norm(h)
+        logits = self.fc_out(h)
+        return logits, None
+        
+    @torch.no_grad()
+    def generate(self, prompt_bytes, max_new_bytes=100, temp=0.8):
+        self.eval()
+        generated = prompt_bytes
+        for _ in range(max_new_bytes):
+            logits, _ = self.forward(generated)
+            next_logit = logits[:, -1, :] / temp
+            next_byte = torch.multinomial(F.softmax(next_logit, dim=-1), num_samples=1)
+            generated = torch.cat([generated, next_byte], dim=1)
+        return generated
+
+# =============================================================================
+# TRAINING SCRIPT
 # =============================================================================
 
 def get_gpu_memory():
@@ -52,10 +163,10 @@ PROMPTS = [
     "The capital of France is Paris. The capital of Germany is",
 ]
 
-def run_generation_test(model, device, max_new_bytes=150, temp=0.8):
+def run_generation_test(model, device, name, max_new_bytes=150, temp=0.8):
     model.eval()
     print(f"\n{'='*60}")
-    print("GENERATION TEST: OmegaGDM V2")
+    print(f"GENERATION TEST: {name}")
     print(f"{'='*60}")
     for i, prompt_text in enumerate(PROMPTS):
         prompt_bytes = list(prompt_text.encode('utf-8', errors='ignore'))
@@ -73,72 +184,24 @@ def run_generation_test(model, device, max_new_bytes=150, temp=0.8):
         sys.stdout.flush()
     model.train()
 
-def main():
-    parser = argparse.ArgumentParser(description="Train OmegaGDM V2")
-    parser.add_argument("--no-precheck", action="store_true", help="Skip dataset streaming pre-verification")
-    args = parser.parse_args()
-
-    device = torch.device('cuda')
-    assert torch.cuda.is_available(), "CUDA not found."
-
-    if not args.no_precheck:
-        verify_datasets()
-    else:
-        print("[Dataset] Skipping dataset pre-verification check as requested.")
-
-    # -------------------------------------------------------------------------
-    # MODEL CONFIG — identical to HGDM baseline for fair comparison
-    # -------------------------------------------------------------------------
-    config = OmegaConfig(
-        d_byte=256,
-        catcher_layers=2,
-        renderer_layers=2,
-        d_model=1024,
-        core_layers=12,
-        n_heads=16,
-        d_k=64,
-        d_v=64,
-        d_ff=4096,
-        decimation_rate=8,
-        max_position_embeddings=2048,
-        vocab_size=256,
-        use_state_fusion=False,     # set True to activate CrossLayerStateFusion in core
-    )
-
-    model = OmegaGDM(config, force_sequential=False).to(device)
+def train_model(model, name, max_steps, block_size, batch_size, grad_accum, device):
     params = sum(p.numel() for p in model.parameters())
-
     print(f"\n{'='*60}")
-    print(f"OmegaGDM V2 — Training Run")
+    print(f"TRAINING: {name}")
     print(f"{'='*60}")
-    print(f"[Model]  Parameters:   {params/1e6:.3f} Million")
-    print(f"[Memory] Initial VRAM: {get_gpu_memory()}MB")
-    print(f"[Data]   Mixture: 60% FineWeb-Edu | 25% Wikipedia | 15% Code")
-
-    # -------------------------------------------------------------------------
-    # TRAINING HYPERPARAMETERS — identical to HGDM baseline
-    # -------------------------------------------------------------------------
-    max_steps       = 500
-    grad_accum      = 4
-    batch_size      = 8
-    block_size      = 2048
-    lr              = 4e-4
-    weight_decay    = 0.01
-    grad_clip       = 1.0
-    log_every       = 25
-    log_file        = "omega_v2_train_logs.jsonl"
-
-    opt   = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    print(f"[{name}] Parameters: {params/1e6:.3f} Million")
+    
+    opt = torch.optim.AdamW(model.parameters(), lr=4e-4, weight_decay=0.01)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max_steps, eta_min=1e-5)
 
-    dataloader  = get_1b_dataloader(block_size=block_size, batch_size=batch_size)
+    dataloader = get_1b_dataloader(block_size=block_size, batch_size=batch_size)
     data_stream = iter(dataloader)
 
     model.train()
-    logs     = []
-    t_start  = time.time()
+    logs = []
+    t_start = time.time()
 
-    print(f"\n{'Step':<5} | {'Loss':<10} | {'BPB':<7} | {'VRAM':<8} | {'StepTime':<9} | {'Elapsed'}")
+    print(f"\n{'Step':<5} | {'Loss':<10} | {'BPB':<7} | {'Net VRAM':<10} | {'StepTime':<9} | {'Elapsed'}")
     print("-" * 65)
     sys.stdout.flush()
 
@@ -151,23 +214,20 @@ def main():
 
         for _ in range(grad_accum):
             batch = next(data_stream).to(device)
-            x = batch[:, :-1]
-            y = batch[:, 1:]
+            x, y = batch[:, :-1], batch[:, 1:]
 
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 logits, _ = model(x)
-                loss = F.cross_entropy(
-                    logits.reshape(-1, 256), y.reshape(-1)
-                ) / grad_accum
+                loss = F.cross_entropy(logits.reshape(-1, 256), y.reshape(-1)) / grad_accum
 
             if torch.isnan(loss) or torch.isinf(loss):
-                print(f"[ERROR] NaN/Inf loss at step {step}. Stopping.")
+                print(f"[ERROR] NaN/Inf loss at step {step}.")
                 break
 
             loss.backward()
             accum_loss += loss.item() * grad_accum
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
         sched.step()
 
@@ -185,46 +245,98 @@ def main():
             "step_time": step_time,
         })
 
-        if step % log_every == 0 or step == max_steps - 1:
+        if step % 25 == 0 or step == max_steps - 1:
             elapsed = (time.time() - t_start) / 60
             temp = get_gpu_temp()
-            print(
-                f"{step:04d} | {accum_loss:<10.4f} | {bpb:<7.4f} | "
-                f"{vram_cache:<5}MB | {step_time:.2f}s     | {elapsed:.1f}min  ({temp})"
-            )
+            print(f"{step:04d} | {accum_loss:<10.4f} | {bpb:<7.4f} | {vram_cache:<6} MB   | {step_time:.2f}s     | {elapsed:.1f}min  ({temp})")
             sys.stdout.flush()
 
-    # -------------------------------------------------------------------------
-    # SAVE LOGS
-    # -------------------------------------------------------------------------
-    with open(log_file, "w") as f:
-        for entry in logs:
-            f.write(json.dumps(entry) + "\n")
-    print(f"\n[System] Training complete. Logs saved to {log_file}")
+    run_generation_test(model, device, name)
+    return logs, params
 
-    # -------------------------------------------------------------------------
-    # SUMMARY
-    # -------------------------------------------------------------------------
-    losses    = [l['loss'] for l in logs]
-    vrams     = [l['vram_mb'] for l in logs if l['vram_mb'] >= 0]
-    times     = [l['step_time'] for l in logs]
-    print(f"\n{'='*60}")
-    print(f"TRAINING SUMMARY — OmegaGDM V2")
-    print(f"{'='*60}")
-    print(f"  Parameters:      {params/1e6:.3f}M")
-    print(f"  Starting Loss:   {losses[0]:.4f}")
-    print(f"  Final Loss:      {losses[-1]:.4f}")
-    print(f"  Minimum Loss:    {min(losses):.4f}")
-    print(f"  Final BPB:       {losses[-1]/math.log(2):.4f}")
-    print(f"  Peak VRAM:       {max(vrams)}MB")
-    print(f"  Avg Step Time:   {sum(times)/len(times):.3f}s")
-    print(f"  Total Time:      {(time.time()-t_start)/60:.1f} min")
-    print(f"{'='*60}")
+def main():
+    parser = argparse.ArgumentParser(description="Train OmegaGDM vs Top Transformer")
+    parser.add_argument("--no-precheck", action="store_true", help="Skip dataset streaming pre-verification")
+    args = parser.parse_args()
 
-    # -------------------------------------------------------------------------
-    # GENERATION TEST
-    # -------------------------------------------------------------------------
-    run_generation_test(model, device)
+    device = torch.device('cuda')
+    assert torch.cuda.is_available(), "CUDA not found."
+
+    if not args.no_precheck:
+        verify_datasets()
+    else:
+        print("[Dataset] Skipping dataset pre-verification check as requested.")
+
+    max_steps = 500
+    grad_accum = 4
+    batch_size = 8
+    block_size = 2048
+
+    # Model 1: LLaMA-3 Style Standard Transformer
+    transformer_model = TopTransformer(
+        vocab_size=256,
+        d_model=1024,
+        n_layers=12,
+        n_heads=16,
+        max_seq_len=2048
+    ).to(device)
+    
+    logs_trans, params_trans = train_model(
+        transformer_model, "Top Transformer (Baseline)", max_steps, block_size, batch_size, grad_accum, device
+    )
+    
+    del transformer_model
+    torch.cuda.empty_cache()
+
+    # Model 2: OmegaGDM V2.1
+    omega_cfg = OmegaConfig(
+        d_byte=256,
+        catcher_layers=2,
+        renderer_layers=2,
+        d_model=1024,
+        core_layers=12,
+        n_heads=16,
+        d_k=64,
+        d_v=64,
+        d_ff=4096,
+        decimation_rate=8,
+        max_position_embeddings=2048,
+        vocab_size=256,
+        use_state_fusion=False
+    )
+    omega_model = OmegaGDM(omega_cfg, force_sequential=False).to(device)
+    
+    logs_omega, params_omega = train_model(
+        omega_model, "OmegaGDM (New)", max_steps, block_size, batch_size, grad_accum, device
+    )
+
+    # FINAL COMPARISON
+    print(f"\n{'='*100}")
+    print(f"FINAL COMPARISON: Top Transformer  vs  OmegaGDM")
+    print(f"{'='*100}")
+    
+    min_loss_t = min(l['loss'] for l in logs_trans)
+    min_loss_o = min(l['loss'] for l in logs_omega)
+    vram_t = max(l['vram_mb'] for l in logs_trans)
+    vram_o = max(l['vram_mb'] for l in logs_omega)
+    time_t = sum(l['step_time'] for l in logs_trans) / len(logs_trans)
+    time_o = sum(l['step_time'] for l in logs_omega) / len(logs_omega)
+    
+    def diff_str(v_base, v_new, is_lower_better=True):
+        if v_base == 0: return "N/A"
+        pct = ((v_new - v_base) / v_base) * 100
+        if is_lower_better:
+            return f"{-pct:.1f}% better" if pct < 0 else f"{pct:.1f}% worse"
+        return f"{pct:.1f}% larger" if pct > 0 else f"{-pct:.1f}% smaller"
+
+    print(f"{'Metric':<28} | {'Top Transformer':<20} | {'OmegaGDM':<20} | {'OmegaGDM Improvement'}")
+    print("-" * 100)
+    print(f"{'Parameters':<28} | {params_trans/1e6:<18.2f} M | {params_omega/1e6:<18.2f} M | {diff_str(params_trans, params_omega, False)}")
+    print(f"{'Minimum Loss':<28} | {min_loss_t:<20.4f} | {min_loss_o:<20.4f} | {diff_str(min_loss_t, min_loss_o)}")
+    print(f"{'Final BPB':<28} | {logs_trans[-1]['bpb']:<20.4f} | {logs_omega[-1]['bpb']:<20.4f} | {diff_str(logs_trans[-1]['bpb'], logs_omega[-1]['bpb'])}")
+    print(f"{'Peak Net VRAM':<28} | {vram_t:<18}MB | {vram_o:<18}MB | {diff_str(vram_t, vram_o)}")
+    print(f"{'Avg Step Time':<28} | {time_t:<19.3f}s | {time_o:<19.3f}s | {diff_str(time_t, time_o)}")
+    print(f"{'='*100}")
 
 if __name__ == "__main__":
     main()

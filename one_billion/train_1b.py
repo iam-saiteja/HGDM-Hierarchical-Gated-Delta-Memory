@@ -7,8 +7,10 @@ import subprocess
 import math
 import json
 import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import itertools
-from hgdm_ultimate import HGDMUltimate, HGDMConfig
+from hgdm_omega import OmegaGDM, OmegaConfig
 from data_1b import get_1b_dataloader
 
 class NaNDetectedException(Exception):
@@ -68,14 +70,20 @@ def train_1b_cluster():
     # -------------------------------------------------------------------------
     # 1. SCALE CONFIGURATION TO 1 BILLION PARAMETERS
     # -------------------------------------------------------------------------
-    config = HGDMConfig(
+    config = OmegaConfig(
+        d_byte=256,
+        catcher_layers=2,
+        renderer_layers=2,
         d_model=2048,        # Width
-        n_layers=18,         # Depth
+        core_layers=18,      # Depth
         n_heads=32,          # Heads (32 * 64 = 2048)
         d_k=64,              # Triton constraint
         d_v=64,              # Triton constraint
         d_ff=5460,           # SwiGLU scale (~ 8/3 * d_model)
-        vocab_size=256
+        decimation_rate=8,
+        max_position_embeddings=65536,
+        vocab_size=256,
+        use_state_fusion=False
     )
     
     print("================================================================")
@@ -83,7 +91,7 @@ def train_1b_cluster():
     print("================================================================")
     print("[Dataset] Mixture Proportions: 60% FineWeb-Edu, 25% English Wikipedia, 15% Clean Code")
     
-    model = HGDMUltimate(config).to(device)
+    model = OmegaGDM(config).to(device)
     model.train() 
     
     param_count = sum(p.numel() for p in model.parameters())
