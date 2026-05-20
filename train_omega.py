@@ -7,28 +7,26 @@ import subprocess
 import math
 import json
 import sys
-from hgdm_ultimate import HGDMUltimate, HGDMConfig
+import argparse
 from hgdm_omega import OmegaGDM, OmegaConfig
 from data_1b import get_1b_dataloader
 
-PREOCCUPIED_MEM = 0  # Full GPU now available — no preoccupied memory to subtract
+# =============================================================================
+# OMEGAGDM V2 — TRAINING + INFERENCE
+# Config kept identical to the HGDM baseline run for fair comparison.
+# =============================================================================
 
-def get_net_gpu_memory():
-    """Queries nvidia-smi and subtracts preoccupied baseline (11,570 MB)."""
+def get_gpu_memory():
     try:
         cmd = "nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits"
-        output = subprocess.check_output(cmd, shell=True).decode().strip()
-        total_used = int(output)
-        net_used = max(0, total_used - PREOCCUPIED_MEM)
-        return net_used
+        return int(subprocess.check_output(cmd, shell=True).decode().strip())
     except Exception:
         return -1
 
 def get_gpu_temp():
     try:
         cmd = "nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits"
-        output = subprocess.check_output(cmd, shell=True).decode().strip()
-        return f"{output}C"
+        return subprocess.check_output(cmd, shell=True).decode().strip() + "C"
     except Exception:
         return "N/A"
 
@@ -42,81 +40,10 @@ def verify_datasets():
         print(f"[Dataset] Wikipedia verified! Sample title: {wiki.get('title', 'N/A')}")
         code = next(iter(load_dataset("codeparrot/codeparrot-clean", split="train", streaming=True)))
         print(f"[Dataset] CodeParrot-clean verified! Sample content len: {len(code.get('content', ''))}")
-        print("[Dataset] All streaming pipelines successfully connected and verified!")
+        print("[Dataset] All streaming pipelines verified!")
     except Exception as e:
         print(f"\n[CRITICAL ERROR] Dataset verification failed: {e}")
         sys.exit(1)
-
-def run_training_sprint(model, model_name, max_steps, grad_accum_steps, batch_size, block_size, device):
-    """
-    Trains the given model for max_steps steps on a freshly initialized data stream.
-    Returns a list of log dicts {step, loss, bpb, vram_mb, step_time}.
-    """
-    opt = torch.optim.AdamW(model.parameters(), lr=4e-4, weight_decay=0.01)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max_steps, eta_min=1e-5)
-
-    # Fresh data stream for each model to ensure identical data exposure
-    dataloader = get_1b_dataloader(block_size=block_size, batch_size=batch_size)
-    data_stream = iter(dataloader)
-
-    model.train()
-    logs = []
-    t_start = time.time()
-
-    print(f"\n{'='*60}")
-    print(f"TRAINING: {model_name}")
-    print(f"{'='*60}")
-    print(f"{'Step':<5} | {'Loss':<10} | {'BPB':<7} | {'Net VRAM':<10} | {'StepTime':<9} | {'Elapsed'}")
-    print(f"{'-'*65}")
-    sys.stdout.flush()
-
-    for step in range(max_steps):
-        opt.zero_grad(set_to_none=True)
-        accum_loss = 0.0
-        t_step = time.time()
-
-        for _ in range(grad_accum_steps):
-            batch = next(data_stream).to(device)
-            x = batch[:, :-1]
-            y = batch[:, 1:]
-
-            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                logits, _ = model(x)
-                loss = F.cross_entropy(logits.reshape(-1, 256), y.reshape(-1)) / grad_accum_steps
-
-            if torch.isnan(loss) or torch.isinf(loss):
-                print(f"[ERROR] NaN/Inf loss at step {step}! Stopping.")
-                return logs
-
-            loss.backward()
-            accum_loss += loss.item() * grad_accum_steps
-
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        opt.step()
-        sched.step()
-
-        step_time = time.time() - t_step
-        bpb = accum_loss / math.log(2)
-
-        # Query nvidia-smi only every 5 steps to avoid overhead
-        vram_mb = get_net_gpu_memory() if step % 5 == 0 else (logs[-1]['vram_mb'] if logs else -1)
-
-        logs.append({
-            "step": step,
-            "loss": accum_loss,
-            "bpb": bpb,
-            "vram_mb": vram_mb,
-            "step_time": step_time
-        })
-
-        if step % 25 == 0 or step == max_steps - 1:
-            elapsed = (time.time() - t_start) / 60
-            temp = get_gpu_temp()
-            print(f"{step:04d} | {accum_loss:<10.4f} | {bpb:<7.4f} | {vram_mb:<7}MB   | {step_time:.2f}s     | {elapsed:.1f}min  ({temp})")
-            sys.stdout.flush()
-
-    return logs
-
 
 PROMPTS = [
     "The theory of relativity states that",
@@ -125,116 +52,44 @@ PROMPTS = [
     "The capital of France is Paris. The capital of Germany is",
 ]
 
-def run_generation_test(model, model_name, device, max_new_bytes=150, temp=0.8):
-    """Runs generation on a fixed set of prompts and prints decoded output."""
+def run_generation_test(model, device, max_new_bytes=150, temp=0.8):
     model.eval()
     print(f"\n{'='*60}")
-    print(f"GENERATION TEST: {model_name}")
+    print("GENERATION TEST: OmegaGDM V2")
     print(f"{'='*60}")
-
     for i, prompt_text in enumerate(PROMPTS):
         prompt_bytes = list(prompt_text.encode('utf-8', errors='ignore'))
         prompt_tensor = torch.tensor([prompt_bytes], dtype=torch.long, device=device)
-
         try:
             with torch.no_grad():
                 generated = model.generate(prompt_tensor, max_new_bytes=max_new_bytes, temp=temp)
-            # Decode only the newly generated bytes (skip prompt)
             new_bytes = generated[0, len(prompt_bytes):].tolist()
             decoded = bytes(new_bytes).decode('utf-8', errors='replace')
         except Exception as e:
-            decoded = f"[ERROR during generation: {e}]"
-
+            decoded = f"[ERROR: {e}]"
         print(f"\n--- Prompt {i+1} ---")
         print(f"PROMPT : {prompt_text!r}")
         print(f"OUTPUT : {decoded!r}")
         sys.stdout.flush()
-
     model.train()
 
-
-def print_comparison_table(logs_hgdm, logs_omega, params_hgdm, params_omega):
-    print("\n")
-    print("=" * 100)
-    print("FINAL COMPARISON: HGDM (Previous)  vs  OmegaGDM (New)")
-    print("=" * 100)
-
-    # Aggregate metrics
-    def stats(logs):
-        losses = [l['loss'] for l in logs]
-        bpbs   = [l['bpb'] for l in logs]
-        vrams  = [l['vram_mb'] for l in logs if l['vram_mb'] >= 0]
-        times  = [l['step_time'] for l in logs]
-        return {
-            "loss_start": losses[0] if losses else 0,
-            "loss_final": losses[-1] if losses else 0,
-            "loss_min":   min(losses) if losses else 0,
-            "bpb_final":  bpbs[-1] if bpbs else 0,
-            "vram_peak":  max(vrams) if vrams else 0,
-            "vram_avg":   sum(vrams) / len(vrams) if vrams else 0,
-            "time_per_step_avg": sum(times) / len(times) if times else 0,
-        }
-
-    h = stats(logs_hgdm)
-    o = stats(logs_omega)
-
-    def improvement(old, new, lower_is_better=True):
-        if old == 0:
-            return "N/A"
-        pct = ((old - new) / abs(old)) * 100
-        if lower_is_better:
-            return f"{'+' if pct > 0 else ''}{pct:.1f}% {'better' if pct > 0 else 'worse'}"
-        else:
-            return f"{'+' if pct > 0 else ''}{pct:.1f}% {'better' if pct < 0 else 'worse'}"
-
-    rows = [
-        ("Parameters",         f"{params_hgdm/1e6:.2f}M",     f"{params_omega/1e6:.2f}M",   f"+{(params_omega-params_hgdm)/params_hgdm*100:.1f}% larger"),
-        ("Starting Loss",      f"{h['loss_start']:.4f}",       f"{o['loss_start']:.4f}",     improvement(h['loss_start'], o['loss_start'])),
-        ("Final Loss",         f"{h['loss_final']:.4f}",       f"{o['loss_final']:.4f}",     improvement(h['loss_final'], o['loss_final'])),
-        ("Minimum Loss",       f"{h['loss_min']:.4f}",         f"{o['loss_min']:.4f}",       improvement(h['loss_min'], o['loss_min'])),
-        ("Final BPB",          f"{h['bpb_final']:.4f}",        f"{o['bpb_final']:.4f}",      improvement(h['bpb_final'], o['bpb_final'])),
-        ("Peak Net VRAM",      f"{h['vram_peak']}MB",          f"{o['vram_peak']}MB",        improvement(h['vram_peak'], o['vram_peak'])),
-        ("Avg Net VRAM",       f"{h['vram_avg']:.0f}MB",       f"{o['vram_avg']:.0f}MB",     improvement(h['vram_avg'], o['vram_avg'])),
-        ("Avg Step Time",      f"{h['time_per_step_avg']:.3f}s", f"{o['time_per_step_avg']:.3f}s", improvement(h['time_per_step_avg'], o['time_per_step_avg'])),
-    ]
-
-    print(f"\n{'Metric':<28} | {'HGDM (Previous)':<20} | {'OmegaGDM (New)':<20} | {'OmegaGDM Improvement'}")
-    print("-" * 100)
-    for metric, h_val, o_val, impr in rows:
-        print(f"{metric:<28} | {h_val:<20} | {o_val:<20} | {impr}")
-    print("=" * 100)
-
-    # Save comparison to JSON
-    with open("comparison_results.json", "w") as f:
-        json.dump({
-            "params_hgdm": params_hgdm,
-            "params_omega": params_omega,
-            "logs_hgdm": logs_hgdm,
-            "logs_omega": logs_omega,
-        }, f, indent=2)
-    print("\n[System] Full comparison results saved to comparison_results.json")
-
 def main():
+    parser = argparse.ArgumentParser(description="Train OmegaGDM V2")
+    parser.add_argument("--no-precheck", action="store_true", help="Skip dataset streaming pre-verification")
+    args = parser.parse_args()
+
     device = torch.device('cuda')
-    assert torch.cuda.is_available(), "CUDA Environment Not Found."
+    assert torch.cuda.is_available(), "CUDA not found."
 
-    verify_datasets()
+    if not args.no_precheck:
+        verify_datasets()
+    else:
+        print("[Dataset] Skipping dataset pre-verification check as requested.")
 
     # -------------------------------------------------------------------------
-    # 1. MATCHING MODEL CONFIGURATIONS — scaled to 24GB GPU (~120M-140M params)
+    # MODEL CONFIG — identical to HGDM baseline for fair comparison
     # -------------------------------------------------------------------------
-    config_hgdm = HGDMConfig(
-        d_model=1024,
-        n_layers=12,
-        n_heads=16,
-        d_k=64,
-        d_v=64,
-        d_ff=4096,
-        max_position_embeddings=2048,
-        vocab_size=256
-    )
-
-    config_omega = OmegaConfig(
+    config = OmegaConfig(
         d_byte=256,
         catcher_layers=2,
         renderer_layers=2,
@@ -246,62 +101,130 @@ def main():
         d_ff=4096,
         decimation_rate=8,
         max_position_embeddings=2048,
-        vocab_size=256
+        vocab_size=256,
+        use_state_fusion=False,     # set True to activate CrossLayerStateFusion in core
     )
 
-    print("\n================================================================")
-    print("SEQUENTIAL COMPARISON TRAINING SPRINT: HGDM vs OmegaGDM")
-    print("SCALE: ~120M-140M params | 24GB GPU | 2000 steps")
-    print("================================================================")
-    print("[Dataset] Mixture: 60% FineWeb-Edu, 25% Wikipedia, 15% Code")
-    print(f"[Memory]  Initial Total VRAM Used (nvidia-smi): {get_net_gpu_memory()}MB")
+    model = OmegaGDM(config, force_sequential=False).to(device)
+    params = sum(p.numel() for p in model.parameters())
 
-    max_steps = 500
-    grad_accum_steps = 4   # Reduced: batch_size doubled, same effective tokens
-    batch_size = 8         # Doubled: fills the full 24GB GPU
-    block_size = 2048      # Full context window
+    print(f"\n{'='*60}")
+    print(f"OmegaGDM V2 — Training Run")
+    print(f"{'='*60}")
+    print(f"[Model]  Parameters:   {params/1e6:.3f} Million")
+    print(f"[Memory] Initial VRAM: {get_gpu_memory()}MB")
+    print(f"[Data]   Mixture: 60% FineWeb-Edu | 25% Wikipedia | 15% Code")
 
     # -------------------------------------------------------------------------
-    # 2. TRAIN HGDM (Previous) — 1000 steps on a fresh stream
+    # TRAINING HYPERPARAMETERS — identical to HGDM baseline
     # -------------------------------------------------------------------------
-    model_hgdm = HGDMUltimate(config_hgdm, force_sequential=False).to(device)
-    params_hgdm = sum(p.numel() for p in model_hgdm.parameters())
-    print(f"\n[HGDM]    Parameters: {params_hgdm/1e6:.3f} Million")
+    max_steps       = 500
+    grad_accum      = 4
+    batch_size      = 8
+    block_size      = 2048
+    lr              = 4e-4
+    weight_decay    = 0.01
+    grad_clip       = 1.0
+    log_every       = 25
+    log_file        = "omega_v2_train_logs.jsonl"
 
-    logs_hgdm = run_training_sprint(
-        model_hgdm, "HGDM (Previous)", max_steps,
-        grad_accum_steps, batch_size, block_size, device
-    )
+    opt   = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max_steps, eta_min=1e-5)
 
-    # Test generation immediately after HGDM finishes, before freeing GPU
-    run_generation_test(model_hgdm, "HGDM (Previous)", device)
+    dataloader  = get_1b_dataloader(block_size=block_size, batch_size=batch_size)
+    data_stream = iter(dataloader)
 
-    # Free HGDM from GPU memory before OmegaGDM runs
-    del model_hgdm
-    torch.cuda.empty_cache()
+    model.train()
+    logs     = []
+    t_start  = time.time()
+
+    print(f"\n{'Step':<5} | {'Loss':<10} | {'BPB':<7} | {'VRAM':<8} | {'StepTime':<9} | {'Elapsed'}")
+    print("-" * 65)
+    sys.stdout.flush()
+
+    vram_cache = get_gpu_memory()
+
+    for step in range(max_steps):
+        opt.zero_grad(set_to_none=True)
+        accum_loss = 0.0
+        t_step = time.time()
+
+        for _ in range(grad_accum):
+            batch = next(data_stream).to(device)
+            x = batch[:, :-1]
+            y = batch[:, 1:]
+
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                logits, _ = model(x)
+                loss = F.cross_entropy(
+                    logits.reshape(-1, 256), y.reshape(-1)
+                ) / grad_accum
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"[ERROR] NaN/Inf loss at step {step}. Stopping.")
+                break
+
+            loss.backward()
+            accum_loss += loss.item() * grad_accum
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        opt.step()
+        sched.step()
+
+        step_time = time.time() - t_step
+        bpb = accum_loss / math.log(2)
+
+        if step % 5 == 0:
+            vram_cache = get_gpu_memory()
+
+        logs.append({
+            "step": step,
+            "loss": accum_loss,
+            "bpb": bpb,
+            "vram_mb": vram_cache,
+            "step_time": step_time,
+        })
+
+        if step % log_every == 0 or step == max_steps - 1:
+            elapsed = (time.time() - t_start) / 60
+            temp = get_gpu_temp()
+            print(
+                f"{step:04d} | {accum_loss:<10.4f} | {bpb:<7.4f} | "
+                f"{vram_cache:<5}MB | {step_time:.2f}s     | {elapsed:.1f}min  ({temp})"
+            )
+            sys.stdout.flush()
 
     # -------------------------------------------------------------------------
-    # 3. TRAIN OmegaGDM (New) — 1000 steps on a fresh stream (same data order)
+    # SAVE LOGS
     # -------------------------------------------------------------------------
-    model_omega = OmegaGDM(config_omega, force_sequential=False).to(device)
-    params_omega = sum(p.numel() for p in model_omega.parameters())
-    print(f"\n[OmegaGDM] Parameters: {params_omega/1e6:.3f} Million")
-
-    logs_omega = run_training_sprint(
-        model_omega, "OmegaGDM (New)", max_steps,
-        grad_accum_steps, batch_size, block_size, device
-    )
-
-    # Test generation immediately after OmegaGDM finishes, before freeing GPU
-    run_generation_test(model_omega, "OmegaGDM (New)", device)
-
-    del model_omega
-    torch.cuda.empty_cache()
+    with open(log_file, "w") as f:
+        for entry in logs:
+            f.write(json.dumps(entry) + "\n")
+    print(f"\n[System] Training complete. Logs saved to {log_file}")
 
     # -------------------------------------------------------------------------
-    # 4. PRINT FINAL COMPARISON TABLE
+    # SUMMARY
     # -------------------------------------------------------------------------
-    print_comparison_table(logs_hgdm, logs_omega, params_hgdm, params_omega)
+    losses    = [l['loss'] for l in logs]
+    vrams     = [l['vram_mb'] for l in logs if l['vram_mb'] >= 0]
+    times     = [l['step_time'] for l in logs]
+    print(f"\n{'='*60}")
+    print(f"TRAINING SUMMARY — OmegaGDM V2")
+    print(f"{'='*60}")
+    print(f"  Parameters:      {params/1e6:.3f}M")
+    print(f"  Starting Loss:   {losses[0]:.4f}")
+    print(f"  Final Loss:      {losses[-1]:.4f}")
+    print(f"  Minimum Loss:    {min(losses):.4f}")
+    print(f"  Final BPB:       {losses[-1]/math.log(2):.4f}")
+    print(f"  Peak VRAM:       {max(vrams)}MB")
+    print(f"  Avg Step Time:   {sum(times)/len(times):.3f}s")
+    print(f"  Total Time:      {(time.time()-t_start)/60:.1f} min")
+    print(f"{'='*60}")
+
+    # -------------------------------------------------------------------------
+    # GENERATION TEST
+    # -------------------------------------------------------------------------
+    run_generation_test(model, device)
 
 if __name__ == "__main__":
     main()
