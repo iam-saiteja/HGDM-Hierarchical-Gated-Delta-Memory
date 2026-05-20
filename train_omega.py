@@ -229,7 +229,7 @@ def train_omega():
                 # Forward pass wrapped under native bfloat16 autocast
                 with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                     logits, _ = model(x)
-                    loss = F.cross_entropy(logits.view(-1, 256), y.view(-1)) / grad_accum_steps
+                    loss = F.cross_entropy(logits.reshape(-1, 256), y.reshape(-1)) / grad_accum_steps
                 
                 if torch.isnan(loss) or torch.isinf(loss):
                     raise NaNDetectedException(f"NaN or Inf loss detected at Step {step} during accum step {accum_step}!")
