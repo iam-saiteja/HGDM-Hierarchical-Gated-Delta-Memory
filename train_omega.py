@@ -256,7 +256,7 @@ def main():
     print("[Dataset] Mixture: 60% FineWeb-Edu, 25% Wikipedia, 15% Code")
     print(f"[Memory]  Initial Total VRAM Used (nvidia-smi): {get_net_gpu_memory()}MB")
 
-    max_steps = 2000
+    max_steps = 500
     grad_accum_steps = 4   # Reduced: batch_size doubled, same effective tokens
     batch_size = 8         # Doubled: fills the full 24GB GPU
     block_size = 2048      # Full context window
