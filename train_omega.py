@@ -11,7 +11,7 @@ from hgdm_ultimate import HGDMUltimate, HGDMConfig
 from hgdm_omega import OmegaGDM, OmegaConfig
 from data_1b import get_1b_dataloader
 
-PREOCCUPIED_MEM = 11570  # MB preoccupied by friend's process
+PREOCCUPIED_MEM = 0  # Full GPU now available — no preoccupied memory to subtract
 
 def get_net_gpu_memory():
     """Queries nvidia-smi and subtracts preoccupied baseline (11,570 MB)."""
@@ -221,16 +221,16 @@ def main():
     verify_datasets()
 
     # -------------------------------------------------------------------------
-    # 1. MATCHING MODEL CONFIGURATIONS (~27M - 32M parameters)
+    # 1. MATCHING MODEL CONFIGURATIONS — scaled to 24GB GPU (~120M-140M params)
     # -------------------------------------------------------------------------
     config_hgdm = HGDMConfig(
-        d_model=512,
-        n_layers=6,
-        n_heads=8,
+        d_model=1024,
+        n_layers=12,
+        n_heads=16,
         d_k=64,
         d_v=64,
-        d_ff=2048,
-        max_position_embeddings=1024,
+        d_ff=4096,
+        max_position_embeddings=2048,
         vocab_size=256
     )
 
@@ -238,27 +238,28 @@ def main():
         d_byte=256,
         catcher_layers=2,
         renderer_layers=2,
-        d_model=512,
-        core_layers=6,
-        n_heads=8,
+        d_model=1024,
+        core_layers=12,
+        n_heads=16,
         d_k=64,
         d_v=64,
-        d_ff=2048,
+        d_ff=4096,
         decimation_rate=8,
-        max_position_embeddings=1024,
+        max_position_embeddings=2048,
         vocab_size=256
     )
 
     print("\n================================================================")
     print("SEQUENTIAL COMPARISON TRAINING SPRINT: HGDM vs OmegaGDM")
+    print("SCALE: ~120M-140M params | 24GB GPU | 2000 steps")
     print("================================================================")
     print("[Dataset] Mixture: 60% FineWeb-Edu, 25% Wikipedia, 15% Code")
-    print(f"[Memory]  Initial Net VRAM (nvidia-smi - 11,570MB): {get_net_gpu_memory()}MB")
+    print(f"[Memory]  Initial Total VRAM Used (nvidia-smi): {get_net_gpu_memory()}MB")
 
-    max_steps = 1000
+    max_steps = 2000
     grad_accum_steps = 8
-    batch_size = 2
-    block_size = 1024
+    batch_size = 4      # Scaled up: full GPU now free
+    block_size = 2048   # Scaled up: full context window
 
     # -------------------------------------------------------------------------
     # 2. TRAIN HGDM (Previous) — 1000 steps on a fresh stream
