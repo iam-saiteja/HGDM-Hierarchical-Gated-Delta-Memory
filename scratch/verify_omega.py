@@ -1,5 +1,8 @@
 import torch
 import torch.nn as nn
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from hgdm_omega import OmegaConfig, OmegaGDM
 
 def verify_omega_equivalence():
