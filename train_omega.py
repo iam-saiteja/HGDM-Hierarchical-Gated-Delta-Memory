@@ -8,6 +8,7 @@ import math
 import json
 import sys
 import itertools
+from hgdm_ultimate import HGDMUltimate, HGDMConfig
 from hgdm_omega import OmegaGDM, OmegaConfig
 from data_1b import get_1b_dataloader
 
@@ -18,6 +19,7 @@ class NaNDetectedException(Exception):
 # Global caches for GPU metrics to avoid hot-loop subprocess overhead
 cached_gpu_mem = "N/A"
 cached_temp = "N/A"
+PREOCCUPIED_MEM = 11570  # MB preoccupied by friend
 
 def update_gpu_metrics():
     """Queries nvidia-smi for active VRAM and temperature metrics to update cache."""
@@ -29,8 +31,7 @@ def update_gpu_metrics():
         
         # Subtract preoccupied memory (11,570 MB) as requested
         total_used = int(mem.strip())
-        preoccupied = 11570
-        net_used = max(0, total_used - preoccupied)
+        net_used = max(0, total_used - PREOCCUPIED_MEM)
         
         cached_gpu_mem = f"{net_used}MB"
         cached_temp = f"{temp.strip()}C"
@@ -47,7 +48,7 @@ def get_gpu_temp():
     global cached_temp
     return cached_temp
 
-def train_omega():
+def train_omega_comparison():
     device = torch.device('cuda')
     assert torch.cuda.is_available(), "CUDA Environment Not Found."
     
@@ -76,48 +77,67 @@ def train_omega():
         sys.exit(1)
     
     # -------------------------------------------------------------------------
-    # 1. MODEL CONFIGURATION
+    # 1. SIDE-BY-SIDE MODEL CONFIGURATION (~25M-28M parameter scale)
     # -------------------------------------------------------------------------
-    config = OmegaConfig(
+    # Previous Monolithic HGDM
+    config_hgdm = HGDMConfig(
+        d_model=512,
+        n_layers=6,
+        n_heads=8,
+        d_k=64,
+        d_v=64,
+        d_ff=2048,
+        max_position_embeddings=1024,
+        vocab_size=256
+    )
+    
+    # New OmegaGDM (Temporal Hourglass)
+    config_omega = OmegaConfig(
         d_byte=256,
         catcher_layers=2,
         renderer_layers=2,
         d_model=512,
-        core_layers=12,
+        core_layers=6,
         n_heads=8,
         d_k=64,
         d_v=64,
         d_ff=2048,
         decimation_rate=8, # W = 8
-        max_position_embeddings=2048,
+        max_position_embeddings=1024,
         vocab_size=256
     )
     
     print("================================================================")
-    print("LAUNCHING OMEGAGDM 1000-STEP TRAINING SPRINT")
+    print("LAUNCHING HGDM VS OMEGAGDM COMPARISON TRAINING SPRINT")
     print("================================================================")
     print("[Dataset] Mixture Proportions: 60% FineWeb-Edu, 25% English Wikipedia, 15% Clean Code")
     
-    model = OmegaGDM(config, force_sequential=False).to(device)
-    model.train() 
+    model_hgdm = HGDMUltimate(config_hgdm, force_sequential=False).to(device)
+    model_omega = OmegaGDM(config_omega, force_sequential=False).to(device)
     
-    param_count = sum(p.numel() for p in model.parameters())
-    print(f"[Model] Natively compiled OmegaGDM Target Architecture.")
-    print(f"[Model] Total Parameter Count: {param_count / 1e6:.3f} Million")
+    model_hgdm.train()
+    model_omega.train()
+    
+    params_hgdm = sum(p.numel() for p in model_hgdm.parameters())
+    params_omega = sum(p.numel() for p in model_omega.parameters())
+    print(f"[Model] HGDM (Previous) Params: {params_hgdm / 1e6:.3f} Million")
+    print(f"[Model] OmegaGDM (New) Params:   {params_omega / 1e6:.3f} Million")
     print(f"[Memory] Initial Net VRAM (nvidia-smi - 11,570MB): {get_gpu_memory()}")
     
     # -------------------------------------------------------------------------
-    # 2. OPTIMIZER & PIPELINE SETUP
+    # 2. OPTIMIZERS & PIPELINE SETUP
     # -------------------------------------------------------------------------
-    opt = torch.optim.AdamW(model.parameters(), lr=4e-4, weight_decay=0.01)
+    opt_hgdm = torch.optim.AdamW(model_hgdm.parameters(), lr=4e-4, weight_decay=0.01)
+    opt_omega = torch.optim.AdamW(model_omega.parameters(), lr=4e-4, weight_decay=0.01)
     
-    block_size = 2048
+    block_size = 1024
     batch_size = 2
-    grad_accum_steps = 16  # Effective Batch Size = 2 * 16 * 2048 = 65,536 tokens per update
+    grad_accum_steps = 8  # Effective Batch Size = 2 * 8 * 1024 = 16,384 tokens per update
     max_steps = 1000
     
-    # Cosine Annealing Learning Rate Scheduler for quality convergence
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max_steps, eta_min=1e-5)
+    # Cosine Annealing Learning Rate Schedulers
+    sched_hgdm = torch.optim.lr_scheduler.CosineAnnealingLR(opt_hgdm, T_max=max_steps, eta_min=1e-5)
+    sched_omega = torch.optim.lr_scheduler.CosineAnnealingLR(opt_omega, T_max=max_steps, eta_min=1e-5)
     
     dataloader = get_1b_dataloader(block_size=block_size, batch_size=batch_size)
     data_stream = iter(dataloader)
@@ -125,8 +145,8 @@ def train_omega():
     # -------------------------------------------------------------------------
     # 3. AUTO-RESUME CHECKPOINT & LOGS LOADING
     # -------------------------------------------------------------------------
-    checkpoint_path = "omega_checkpoint.pt"
-    log_jsonl_path = "train_omega_logs.jsonl"
+    checkpoint_path = "omega_comparison_checkpoint.pt"
+    log_jsonl_path = "train_omega_comparison_logs.jsonl"
     
     start_step = 0
     tokens_trained = 0
@@ -135,10 +155,12 @@ def train_omega():
         print(f"[System] Found existing checkpoint at {checkpoint_path}. Resuming training...")
         try:
             checkpoint = torch.load(checkpoint_path, map_location="cpu")
-            model.load_state_dict(checkpoint['model_state_dict'])
-            opt.load_state_dict(checkpoint['optimizer_state_dict'])
-            if 'scheduler_state_dict' in checkpoint:
-                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            model_hgdm.load_state_dict(checkpoint['model_hgdm_state_dict'])
+            model_omega.load_state_dict(checkpoint['model_omega_state_dict'])
+            opt_hgdm.load_state_dict(checkpoint['opt_hgdm_state_dict'])
+            opt_omega.load_state_dict(checkpoint['opt_omega_state_dict'])
+            sched_hgdm.load_state_dict(checkpoint['sched_hgdm_state_dict'])
+            sched_omega.load_state_dict(checkpoint['sched_omega_state_dict'])
             start_step = checkpoint['step']
             tokens_trained = checkpoint.get('tokens_trained', start_step * batch_size * block_size * grad_accum_steps)
             print(f"[System] Resumed successfully from Step {start_step} | Tokens trained: {tokens_trained:,}")
@@ -195,9 +217,12 @@ def train_omega():
     # Helper to save checkpoint securely
     def save_checkpoint(current_step, current_tokens):
         state = {
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': opt.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
+            'model_hgdm_state_dict': model_hgdm.state_dict(),
+            'model_omega_state_dict': model_omega.state_dict(),
+            'opt_hgdm_state_dict': opt_hgdm.state_dict(),
+            'opt_omega_state_dict': opt_omega.state_dict(),
+            'sched_hgdm_state_dict': sched_hgdm.state_dict(),
+            'sched_omega_state_dict': sched_omega.state_dict(),
             'step': current_step,
             'tokens_trained': current_tokens
         }
@@ -209,14 +234,23 @@ def train_omega():
             os.rename(tmp_path, checkpoint_path)
 
     # -------------------------------------------------------------------------
-    # 5. TRAINING LOOP
+    # 5. SIDE-BY-SIDE TRAINING LOOP
     # -------------------------------------------------------------------------
     step = start_step
     
+    print("\n-------------------------------------------------------------------------------------------------")
+    print(f"{'Step':<5} | {'HGDM Loss':<10} | {'Omega Loss':<10} | {'HGDM VRAM':<10} | {'Omega VRAM':<10} | {'Step Time':<10} | {'Elapsed':<10}")
+    print("-------------------------------------------------------------------------------------------------")
+    sys.stdout.flush()
+    
     try:
         while step < max_steps:
-            opt.zero_grad(set_to_none=True)
-            accum_loss = 0.0
+            # Zero grads
+            opt_hgdm.zero_grad(set_to_none=True)
+            opt_omega.zero_grad(set_to_none=True)
+            
+            loss_hgdm_accum = 0.0
+            loss_omega_accum = 0.0
             
             t_step_start = time.time()
             
@@ -226,36 +260,60 @@ def train_omega():
                 x = batch[:, :-1]
                 y = batch[:, 1:]
                 
-                # Forward pass wrapped under native bfloat16 autocast
+                # --- HGDM Forward/Backward ---
                 with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                    logits, _ = model(x)
-                    loss = F.cross_entropy(logits.reshape(-1, 256), y.reshape(-1)) / grad_accum_steps
+                    logits_hgdm, _ = model_hgdm(x)
+                    loss_hgdm = F.cross_entropy(logits_hgdm.reshape(-1, 256), y.reshape(-1)) / grad_accum_steps
                 
-                if torch.isnan(loss) or torch.isinf(loss):
-                    raise NaNDetectedException(f"NaN or Inf loss detected at Step {step} during accum step {accum_step}!")
-                    
-                loss.backward()
-                accum_loss += loss.item() * grad_accum_steps
+                if torch.isnan(loss_hgdm) or torch.isinf(loss_hgdm):
+                    raise NaNDetectedException(f"NaN/Inf HGDM loss detected at Step {step} during accum step {accum_step}!")
+                loss_hgdm.backward()
+                loss_hgdm_accum += loss_hgdm.item() * grad_accum_steps
+                
+                # --- OmegaGDM Forward/Backward ---
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                    logits_omega, _ = model_omega(x)
+                    loss_omega = F.cross_entropy(logits_omega.reshape(-1, 256), y.reshape(-1)) / grad_accum_steps
+                
+                if torch.isnan(loss_omega) or torch.isinf(loss_omega):
+                    raise NaNDetectedException(f"NaN/Inf Omega loss detected at Step {step} during accum step {accum_step}!")
+                loss_omega.backward()
+                loss_omega_accum += loss_omega.item() * grad_accum_steps
             
-            # Clip gradients
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
-            scheduler.step()
+            # Anchor gradients to prevent scale explosions
+            torch.nn.utils.clip_grad_norm_(model_hgdm.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model_omega.parameters(), 1.0)
+            
+            # Measure net active training memory (during active backprop/optimizer step)
+            if step % 5 == 0:
+                update_gpu_metrics()
+                net_vram_active = get_gpu_memory()
+            else:
+                net_vram_active = cached_gpu_mem
+                
+            opt_hgdm.step()
+            opt_omega.step()
+            
+            sched_hgdm.step()
+            sched_omega.step()
             
             step_time = time.time() - t_step_start
             tokens_trained += batch_size * block_size * grad_accum_steps
-            bpb = accum_loss / math.log(2)
             
-            # Run background hardware query only at step/print boundaries (saves CPU latency)
+            # Idle net memory after optimizer step releases activation graphs
             if step % 5 == 0:
                 update_gpu_metrics()
+                net_vram_idle = get_gpu_memory()
+            else:
+                net_vram_idle = cached_gpu_mem
                 
             # Log metrics
             log_entry = {
                 "step": step,
-                "loss": accum_loss,
-                "bpb": bpb,
-                "vram": get_gpu_memory(),
+                "loss_hgdm": loss_hgdm_accum,
+                "loss_omega": loss_omega_accum,
+                "vram_hgdm_active": net_vram_active,
+                "vram_omega_idle": net_vram_idle,
                 "temp": get_gpu_temp(),
                 "time": step_time,
                 "tokens_trained": tokens_trained
@@ -264,11 +322,8 @@ def train_omega():
             
             # Print status every 5 steps
             if step % 5 == 0 or step == start_step:
-                lr = opt.param_groups[0]['lr']
                 elapsed_total = time.time() - t_start
-                print(f"Step {step:04d} | Loss: {accum_loss:.4f} | BPB: {bpb:.4f} | "
-                      f"Net VRAM: {get_gpu_memory()} | Temp: {get_gpu_temp()} | "
-                      f"LR: {lr:.2e} | StepTime: {step_time:.2f}s | Elapsed: {elapsed_total/60:.1f}min")
+                print(f"{step:04d} | {loss_hgdm_accum:.4f}    | {loss_omega_accum:.4f}     | {net_vram_active:<10} | {net_vram_idle:<10} | {step_time:.2f}s      | {elapsed_total/60:.1f}min")
                 sys.stdout.flush()
                 
             # Save checkpoint and flush logs every 50 steps
@@ -294,8 +349,8 @@ def train_omega():
     # Flush any remaining logs on clean completion
     flush_logs()
     print("================================================================")
-    print("TRAINING SPRINT COMPLETE.")
+    print("COMPARISON TRAINING SPRINT COMPLETE.")
     print("================================================================")
 
 if __name__ == "__main__":
-    train_omega()
+    train_omega_comparison()
