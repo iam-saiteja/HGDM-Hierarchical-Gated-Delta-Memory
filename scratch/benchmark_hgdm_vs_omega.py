@@ -28,27 +28,27 @@ def benchmark_models():
     # -------------------------------------------------------------------------
     # Previous Monolithic HGDM
     config_hgdm = HGDMConfig(
-        d_model=768,
-        n_layers=12,
-        n_heads=12,
+        d_model=256,
+        n_layers=6,
+        n_heads=4,
         d_k=64,
         d_v=64,
-        d_ff=3072,
+        d_ff=1024,
         max_position_embeddings=2048,
         vocab_size=256
     )
     
     # New OmegaGDM (Temporal Hourglass)
     config_omega = OmegaConfig(
-        d_byte=256,
+        d_byte=128,
         catcher_layers=2,
         renderer_layers=2,
-        d_model=768,
-        core_layers=12,
-        n_heads=12,
+        d_model=256,
+        core_layers=6,
+        n_heads=4,
         d_k=64,
         d_v=64,
-        d_ff=3072,
+        d_ff=1024,
         decimation_rate=8, # W = 8
         max_position_embeddings=2048,
         vocab_size=256
@@ -67,10 +67,10 @@ def benchmark_models():
     print("--------------------------------------------------------------")
     
     # -------------------------------------------------------------------------
-    # Setup test tensors (Standard sequence length = 2048, batch size = 8)
+    # Setup test tensors (Scaled down to fit in tight VRAM budgets)
     # -------------------------------------------------------------------------
-    B = 8
-    T = 2048
+    B = 2
+    T = 1024
     inputs = torch.randint(0, 256, (B, T), device=device)
     
     # Helper to measure forward and backward pass speed and VRAM
