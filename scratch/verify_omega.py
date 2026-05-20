@@ -23,7 +23,7 @@ def verify_omega_equivalence():
     )
     
     # Instantiate model with force_sequential=True to verify on CPU (without Triton)
-    model = OmegaGDM(config, force_sequential=True)
+    model = OmegaGDM(config, force_sequential=True).double()
     model.eval()
     
     # 1. Create a dummy sequence of length 8 (2 complete blocks of W=4)
@@ -32,7 +32,7 @@ def verify_omega_equivalence():
     inputs = torch.randint(0, 256, (B, T))
     
     print(f"Inputs: {inputs}")
-    print(f"Running parallel path for sequence of length {T}...")
+    print(f"Running parallel path for sequence of length {T} in float64...")
     
     # 2. Run parallel forward pass
     with torch.no_grad():
@@ -41,7 +41,7 @@ def verify_omega_equivalence():
     print(f"Parallel output shape: {out_parallel.shape}")
     
     # 3. Run sequential step-by-step forward pass
-    print("Running sequential path step-by-step...")
+    print("Running sequential path step-by-step in float64...")
     states_seq = None
     out_seq_list = []
     
@@ -56,12 +56,12 @@ def verify_omega_equivalence():
     
     # 4. Check for equivalence
     max_diff = (out_parallel - out_sequential).abs().max().item()
-    print(f"Max absolute difference between parallel and sequential outputs: {max_diff:.2e}")
+    print(f"Max absolute difference in float64: {max_diff:.2e}")
     
-    if max_diff < 1e-5:
-        print("[SUCCESS] Parallel and sequential outputs are mathematically equivalent!")
+    if max_diff < 1e-12:
+        print("[SUCCESS] Parallel and sequential outputs are mathematically equivalent in float64!")
     else:
-        print("[FAIL] Output mismatch detected!")
+        print("[FAIL] Output mismatch in float64 detected!")
         # Let's inspect step-by-step values if they mismatch
         for t in range(T):
             diff_t = (out_parallel[:, t] - out_sequential[:, t]).abs().max().item()
