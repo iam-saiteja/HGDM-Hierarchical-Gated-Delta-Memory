@@ -277,8 +277,8 @@ def main():
         print("[Dataset] Skipping dataset pre-verification check as requested.")
 
     max_steps = 100
-    grad_accum = 4
-    batch_size = 8
+    grad_accum = 16
+    batch_size = 2
     block_size = 2048
 
     # Model 1: LLaMA-3 Style Standard Transformer
