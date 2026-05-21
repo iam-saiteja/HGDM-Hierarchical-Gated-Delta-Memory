@@ -1,0 +1,6 @@
+<page>
+  <title>DeepMind</title>
+  <revision>
+    <text xml:space="preserve">Google DeepMind is a pioneer in the field of artificial intelligence. By combining standard neural networks with advanced reinforcement learning techniques and search algorithms, they have solved some of the most complex scientific challenges, including protein folding structure prediction and general multi-task learning.                                                                                   </text>
+  </revision>
+</page>
