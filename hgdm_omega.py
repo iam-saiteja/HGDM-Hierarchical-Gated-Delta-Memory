@@ -74,12 +74,12 @@ class OmegaGDM(nn.Module):
         self.highway_td_norm   = RMSNorm(dk_core * dv_core)
         self.highway_td_proj_k = nn.Linear(dk_core, dk_ren, bias=False)
         self.highway_td_proj_v = nn.Linear(dv_core, dv_ren, bias=False)
-        self.highway_td_gate   = nn.Parameter(torch.full((H_ren,), -4.0))
+        self.highway_td_gate   = nn.Parameter(torch.full((H_ren,), -1.0))
 
         self.highway_bu_norm   = RMSNorm(dk_ren * dv_ren)
         self.highway_bu_proj_k = nn.Linear(dk_ren, dk_core, bias=False)
         self.highway_bu_proj_v = nn.Linear(dv_ren, dv_core, bias=False)
-        self.highway_bu_gate   = nn.Parameter(torch.full((H_core,), -4.0))
+        self.highway_bu_gate   = nn.Parameter(torch.full((H_core,), -1.0))
 
         self._core_hw_shape = (H_core, dk_core, dv_core)
         self._ren_hw_shape  = (H_ren,  dk_ren,  dv_ren)

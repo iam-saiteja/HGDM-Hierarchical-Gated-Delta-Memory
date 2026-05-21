@@ -13,7 +13,7 @@ from hgdm_omega import OmegaGDM, OmegaConfig
 
 def auto_detect_config(checkpoint_path):
     print(f"[System] Loading checkpoint to auto-detect model config: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state_dict = checkpoint['model_state_dict']
     
     d_byte = 256
@@ -105,7 +105,7 @@ def load_model(device, checkpoint_path):
     model = OmegaGDM(config).to(device)
     
     print(f"[System] Loading checkpoint from {checkpoint_path}...")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     print("[System] Model state dict successfully loaded!")
     model.eval()
