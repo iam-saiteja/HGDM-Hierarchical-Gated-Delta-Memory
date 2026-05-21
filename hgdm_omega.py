@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from ultimate.hgdm_ultimate import HGDMLayer, RMSNorm, HGDMConfig, CrossLayerStateFusion
 
 # =============================================================================
-# OMEGAGDM V2 — Hierarchical Temporal Decimation (Bugfixed)
+# OMEGAGDM V2 — Hierarchical Temporal Decimation (Bugfixed & Causal)
 # =============================================================================
 
 @dataclass
@@ -37,7 +37,6 @@ class CausalBroadcaster(nn.Module):
     def forward(self, z_semantic, T_original):
         B, N, _ = z_semantic.shape
         zeros = torch.zeros_like(z_semantic[:, :1, :])
-        # N+1 chunks to cover the remaining T % W bytes
         z_shifted = torch.cat([zeros, z_semantic], dim=1) 
         z_proj = self.proj(z_shifted)                  
         z_broadcast = z_proj.repeat_interleave(self.W, dim=1)  
@@ -104,6 +103,7 @@ class OmegaGDM(nn.Module):
         return renderer_state_0 + gate * S_proj
 
     def _apply_bu_highway(self, S_renderer_last, core_state_0):
+        if S_renderer_last is None: return core_state_0
         B = S_renderer_last.shape[0]
         S_mean = S_renderer_last.mean(dim=1)
         S_mean = self.highway_bu_norm(S_mean.reshape(B, -1)).reshape(B, self._ren_hw_shape[1], self._ren_hw_shape[2])
@@ -121,7 +121,11 @@ class OmegaGDM(nn.Module):
             states = [[None]*self.config.catcher_layers, [None]*self.config.core_layers, [None]*self.config.renderer_layers, None, None]
         next_states = [[], [], [], None, None]
 
+        # ==========================================
+        # TRAINING BLOCK (T > 1) - Chunkwise Unrolled
+        # ==========================================
         if T > 1:
+            # 1. Catcher & Decimator run in pure parallel
             for i, layer in enumerate(self.byte_catcher):
                 x_byte, ns = layer(x_byte, states[0][i])
                 next_states[0].append(ns)
@@ -129,66 +133,105 @@ class OmegaGDM(nn.Module):
             x_dec, dec_ns = self.decimator_layer(x_byte, states[3])
             next_states[3] = dec_ns
 
-            # BUG 1 FIX: Only slice completed windows, no F.pad poisoning
             N = T // self.W
-            if N > 0:
-                x_semantic_in = x_dec[:, self.W - 1 : N * self.W : self.W, :]
-                x_semantic_in = self.decimator_proj(self.decimator_norm(x_semantic_in))
+            # --- Edge Case: T < W (prompt shorter than a single chunk) ---
+            if N == 0:
+                x_render = x_byte  # No broadcast yet, core hasn't fired
+                ren_states = list(states[2])
+                for i, layer in enumerate(self.byte_renderer):
+                    x_render, ns = layer(x_render, ren_states[i])
+                    ren_states[i] = ns
 
-                semantic_offset = offset // self.W
+                next_states[1] = list(states[1])  # Core states unchanged
+                next_states[2] = ren_states
+                next_states[4] = {
+                    'byte_pos': T % self.W,
+                    'z_broadcast_cache': torch.zeros(B, self.config.d_byte, device=x_byte.device, dtype=x_byte.dtype),
+                    'prev_renderer_last_S': ren_states[-1] if ren_states[-1] is not None else None,
+                }
+                x_out = self.norm_f(x_render)
+                return self.fc_out(x_out), next_states
+
+            # --- Main Path: Chunkwise Sequential Loop (N >= 1) ---
+            x_render_out = []
+            core_states = list(states[1])
+            ren_states = list(states[2])
+
+            buf = states[4] or {}
+            prev_raw_ren_ns = buf.get('prev_renderer_last_S', None)
+            z_bc_cache = None
+
+            for chunk_idx in range(N):
+                # --- CORE PHASE (1 semantic step per W-byte chunk) ---
+                x_sem_chunk = x_dec[:, (chunk_idx + 1) * self.W - 1 : (chunk_idx + 1) * self.W, :]
+                x_sem_chunk = self.decimator_proj(self.decimator_norm(x_sem_chunk))
+
+                semantic_offset = offset // self.W + chunk_idx
                 pos_idx = semantic_offset % self.semantic_pos_embed.shape[1]
-                if pos_idx + N > self.semantic_pos_embed.shape[1]:
-                    indices = (torch.arange(semantic_offset, semantic_offset + N, device=byte_seq.device) % self.semantic_pos_embed.shape[1])
-                    x_semantic_in = x_semantic_in + self.semantic_pos_embed[:, indices, :]
-                else:
-                    x_semantic_in = x_semantic_in + self.semantic_pos_embed[:, pos_idx : pos_idx + N, :]
+                x_sem_chunk = x_sem_chunk + self.semantic_pos_embed[:, pos_idx : pos_idx + 1, :]
 
-                core_init_0 = states[1][0]
-                if states[4] is not None and states[4].get('prev_renderer_last_S') is not None:
-                    core_init_0 = self._apply_bu_highway(states[4]['prev_renderer_last_S'], core_init_0)
+                # Bottom-Up Highway: previous chunk's Renderer state -> Core layer 0
+                core_states[0] = self._apply_bu_highway(prev_raw_ren_ns, core_states[0])
 
-                core_states_in = [core_init_0] + [states[1][i] for i in range(1, self.config.core_layers)]
-                x_semantic = x_semantic_in
+                x_semantic = x_sem_chunk
                 prev_raw_ns = None
                 for i, layer in enumerate(self.semantic_core):
-                    x_semantic, ns = layer(x_semantic, core_states_in[i])
+                    x_semantic, ns = layer(x_semantic, core_states[i])
                     raw_ns = ns
                     if self.config.use_state_fusion and i > 0 and prev_raw_ns is not None:
                         ns = self.core_state_fusion.fuse(ns, prev_raw_ns, i)
                     prev_raw_ns = raw_ns
-                    next_states[1].append(ns)
+                    core_states[i] = ns
 
                 S_core_last = raw_ns
-                z_broadcast = self.broadcaster(x_semantic, T)
-                z_broadcast_cache = self.broadcaster.proj(x_semantic[:, -1, :]).detach()
-                renderer_init_0 = self._apply_td_highway(S_core_last, states[2][0])
-            else:
-                z_broadcast = torch.zeros(B, T, self.config.d_byte, device=x_byte.device, dtype=x_byte.dtype)
-                if states[4] is not None:
-                    z_broadcast_cache = states[4]['z_broadcast_cache']
-                else:
-                    z_broadcast_cache = torch.zeros(B, self.config.d_byte, device=x_byte.device, dtype=x_byte.dtype)
-                renderer_init_0 = states[2][0]
-                next_states[1] = list(states[1])
+                # Broadcast projection (differentiable in training, no detach)
+                z_broadcast = self.broadcaster.proj(x_semantic).repeat_interleave(self.W, dim=1)
+                if chunk_idx == N - 1:
+                    z_bc_cache = self.broadcaster.proj(x_semantic).detach()
 
-            x_render = x_byte + z_broadcast
-            renderer_states_in = [renderer_init_0] + [states[2][i] for i in range(1, self.config.renderer_layers)]
+                # --- RENDERER PHASE (W bytes) ---
+                # Top-Down Highway: Core's final state -> Renderer layer 0
+                ren_states[0] = self._apply_td_highway(S_core_last, ren_states[0])
 
-            raw_ren_ns = None
-            for i, layer in enumerate(self.byte_renderer):
-                x_render, ns = layer(x_render, renderer_states_in[i])
-                raw_ren_ns = ns
-                next_states[2].append(ns)
+                byte_chunk = x_byte[:, chunk_idx * self.W : (chunk_idx + 1) * self.W, :]
+                x_render = byte_chunk + z_broadcast
 
+                for i, layer in enumerate(self.byte_renderer):
+                    x_render, ns = layer(x_render, ren_states[i])
+                    ren_states[i] = ns
+                    if i == self.config.renderer_layers - 1:
+                        prev_raw_ren_ns = ns
+
+                x_render_out.append(x_render)
+
+            # Handle remainder bytes if T is not perfectly divisible by W
+            remainder = T % self.W
+            if remainder > 0:
+                byte_chunk = x_byte[:, N * self.W :, :]
+                x_render_rem = byte_chunk + z_bc_cache.repeat_interleave(remainder, dim=1)
+                for i, layer in enumerate(self.byte_renderer):
+                    x_render_rem, ns = layer(x_render_rem, ren_states[i])
+                    ren_states[i] = ns
+                    if i == self.config.renderer_layers - 1:
+                        prev_raw_ren_ns = ns
+                x_render_out.append(x_render_rem)
+
+            x_render_full = torch.cat(x_render_out, dim=1)
+
+            next_states[1] = core_states
+            next_states[2] = ren_states
             next_states[4] = {
-                'byte_pos': T % self.W,
-                'z_broadcast_cache': z_broadcast_cache,
-                'prev_renderer_last_S': raw_ren_ns,
+                'byte_pos': remainder,
+                'z_broadcast_cache': z_bc_cache.squeeze(1) if z_bc_cache is not None else torch.zeros(B, self.config.d_byte, device=x_byte.device, dtype=x_byte.dtype),
+                'prev_renderer_last_S': prev_raw_ren_ns,
             }
 
-            x_out = self.norm_f(x_render)
+            x_out = self.norm_f(x_render_full)
             return self.fc_out(x_out), next_states
 
+        # ==========================================
+        # GENERATION BLOCK (T == 1)
+        # ==========================================
         else:
             for i, layer in enumerate(self.byte_catcher):
                 x_byte, ns = layer(x_byte, states[0][i])
@@ -218,7 +261,6 @@ class OmegaGDM(nn.Module):
             if next_byte_pos == self.W:
                 x_sem_chunk = self.decimator_proj(self.decimator_norm(x_dec_step))
                 
-                # BUG 2 FIX: True zero-indexed chunk position
                 chunk_idx = offset // self.W 
                 pos_i = chunk_idx % self.semantic_pos_embed.shape[1]
                 x_sem_chunk = x_sem_chunk + self.semantic_pos_embed[:, pos_i : pos_i + 1, :]

@@ -100,12 +100,35 @@ def load_model(device, checkpoint_path):
     if not os.path.exists(checkpoint_path):
         print(f"[ERROR] Checkpoint path not found: {checkpoint_path}")
         sys.exit(1)
-        
-    config = auto_detect_config(checkpoint_path)
-    model = OmegaGDM(config).to(device)
-    
+
     print(f"[System] Loading checkpoint from {checkpoint_path}...")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    print(f"[System] Using exact testing config override (ignoring embedded checkpoint config):")
+    config = OmegaConfig(
+        d_byte=256,
+        catcher_layers=2,
+        renderer_layers=2,
+        d_model=256,
+        core_layers=4,
+        n_heads=8,
+        d_k=32,
+        d_v=32,
+        d_ff=1024,
+        decimation_rate=8,
+        vocab_size=256,
+        use_state_fusion=False,
+    )
+    print(f"  - d_byte: {config.d_byte}")
+    print(f"  - catcher_layers: {config.catcher_layers}")
+    print(f"  - core_layers: {config.core_layers}")
+    print(f"  - renderer_layers: {config.renderer_layers}")
+    print(f"  - d_model: {config.d_model}")
+    print(f"  - n_heads: {config.n_heads}")
+    print(f"  - d_k: {config.d_k}, d_v: {config.d_v}")
+    print(f"  - d_ff: {config.d_ff}")
+
+    model = OmegaGDM(config).to(device)
     model.load_state_dict(checkpoint['model_state_dict'])
     print("[System] Model state dict successfully loaded!")
     model.eval()
@@ -148,14 +171,21 @@ def run_interpretability_analysis(model, config, prompt_text, device, out_dir):
                 else:
                     alpha = torch.sigmoid(module.W_alpha(x_in))
                 beta = torch.sigmoid(module.W_beta(x_in))
-            alphas_storage[name] = alpha.detach().cpu()
-            betas_storage[name] = beta.detach().cpu()
+            if name not in alphas_storage:
+                alphas_storage[name] = [alpha.detach().cpu()]
+                betas_storage[name] = [beta.detach().cpu()]
+            else:
+                alphas_storage[name].append(alpha.detach().cpu())
+                betas_storage[name].append(beta.detach().cpu())
         return hook
         
     def get_hidden_hook(name, storage):
         def hook(module, input, output):
             x_semantic, _ = output
-            storage[name] = x_semantic.detach().cpu()
+            if name not in storage:
+                storage[name] = [x_semantic.detach().cpu()]
+            else:
+                storage[name].append(x_semantic.detach().cpu())
         return hook
 
     # Register hooks
@@ -178,6 +208,14 @@ def run_interpretability_analysis(model, config, prompt_text, device, out_dir):
     # Remove hooks
     for h in registered_hooks:
         h.remove()
+        
+    # Concatenate accumulated sequence chunks along the time dimension (dim=1)
+    for name in alphas:
+        alphas[name] = torch.cat(alphas[name], dim=1)
+        betas[name] = torch.cat(betas[name], dim=1)
+    if "last_core" in core_hidden_states:
+        core_hidden_states["last_core"] = torch.cat(core_hidden_states["last_core"], dim=1)
+        
     print("[System] Forward pass completed. Analyzing activations...")
     
     # 2. Extract and average gate values per step
