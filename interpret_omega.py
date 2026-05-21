@@ -270,10 +270,10 @@ def main():
     parser = argparse.ArgumentParser(description="HGDM Interpretability Probe")
     parser.add_argument("--model",    default="omega",       choices=["omega", "transformer"])
     parser.add_argument("--ckpt",     default=None,          help="Path to checkpoint .pt")
-    parser.add_argument("--prompt",   default="The theory of relativity states that space and time are")
+    parser.add_argument("--prompt",   default="prompt_512.txt", help="Prompt string or path to a file containing the prompt")
     parser.add_argument("--max-gen",  default=64,  type=int, help="Bytes to generate after prompt")
     parser.add_argument("--temp",     default=0.8, type=float)
-    parser.add_argument("--out",      default="probe_data.json")
+    parser.add_argument("--out",      default="probe_data_512.json")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -293,10 +293,28 @@ def main():
     params = sum(p.numel() for p in model.parameters())
     print(f"[Probe] Model: {model_type}  |  Parameters: {params/1e6:.2f}M")
 
-    # Encode prompt
-    prompt_bytes = list(args.prompt.encode("utf-8", errors="replace"))
+    # Load prompt (check if file path first)
+    prompt_str = args.prompt
+    if os.path.exists(prompt_str):
+        print(f"[Probe] Loading prompt from file: {prompt_str}")
+        with open(prompt_str, "rb") as f:
+            prompt_bytes = list(f.read())
+        prompt_str = bytes(prompt_bytes).decode("utf-8", errors="replace")
+    else:
+        # Fallback default 512-byte string if default file is missing and prompt_str matches default
+        if prompt_str == "prompt_512.txt":
+            prompt_str = (
+                '<page>\n'
+                '  <title>DeepMind</title>\n'
+                '  <revision>\n'
+                '    <text xml:space="preserve">Google DeepMind is a pioneer in the field of artificial intelligence. By combining standard neural networks with advanced reinforcement learning techniques and search algorithms, they have solved some of the most complex scientific challenges, including protein folding structure prediction and general multi-task learning.                                                                                   </text>\n'
+                '  </revision>\n'
+                '</page>'
+            )
+        prompt_bytes = list(prompt_str.encode("utf-8", errors="replace"))
+
     prompt_tensor = torch.tensor([prompt_bytes], dtype=torch.long, device=device)
-    print(f"[Probe] Prompt: {args.prompt!r}  ({len(prompt_bytes)} bytes)")
+    print(f"[Probe] Prompt: {prompt_str!r}  ({len(prompt_bytes)} bytes)")
 
     # Attach probes
     gdm_probe = GDMProbe(model) if args.model == "omega" else None
@@ -356,7 +374,7 @@ def main():
         "meta": {
             "model_type":       model_type,
             "parameters_M":     round(params / 1e6, 3),
-            "prompt":           args.prompt,
+            "prompt":           prompt_str,
             "generated_text":   gen_text,
             "full_text":        full_text,
             "prompt_len":       len(prompt_bytes),
