@@ -277,8 +277,8 @@ def main():
         print("[Dataset] Skipping dataset pre-verification check as requested.")
 
     max_steps = 100
-    grad_accum = 16
-    batch_size = 2
+    grad_accum = 4
+    batch_size = 8
     block_size = 2048
 
     # Model 1: LLaMA-3 Style Standard Transformer
@@ -304,9 +304,9 @@ def main():
         renderer_layers=2,
         d_model=1024,
         core_layers=12,
-        n_heads=32,
-        d_k=32,
-        d_v=32,
+        n_heads=16,
+        d_k=64,
+        d_v=64,
         d_ff=4096,
         decimation_rate=8,
         max_position_embeddings=2048,

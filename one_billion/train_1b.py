@@ -128,7 +128,7 @@ def train_1b_cluster():
     if os.path.exists(checkpoint_path):
         print(f"[System] Found existing checkpoint at {checkpoint_path}. Resuming training...")
         try:
-            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+            checkpoint = torch.load(checkpoint_path, map_location="cpu")
             model.load_state_dict(checkpoint['model_state_dict'])
             opt.load_state_dict(checkpoint['optimizer_state_dict'])
             if 'scheduler_state_dict' in checkpoint:
