@@ -93,9 +93,9 @@ def _chunk_fwd_kernel(
         causal_mask  = offs_t[:, None] >= offs_t[None, :]
         D            = tl.where(causal_mask, D, 0.0)
 
-        # FIX 3: beta applied at write time (rows), not read time (columns)
-        # M[i,j] = D[i,j] * b[i]  — position i is the write position
-        M = D * b[:, None]
+        # beta applied at write time (columns, not rows)
+        # M[i,j] = D[i,j] * b[j] — position j is the write position
+        M = D * b[None, :]
 
         QK        = tl.dot(q, tl.trans(k))
         out_intra = tl.dot(QK * M, v)
@@ -215,7 +215,7 @@ def _chunk_bwd_kernel(
         D              = tl.exp(cum_log_a[:, None] - cum_log_a[None, :])
         causal_mask    = offs_t[:, None] >= offs_t[None, :]
         D              = tl.where(causal_mask, D, 0.0)
-        M              = D * b[:, None]          # FIX 3: rows, not columns
+        M              = D * b[None, :]          # Columns, not rows
         decay          = tl.exp(cum_log_a)
 
         mask_last      = offs_t == CHUNK_SIZE - 1  # FIX 6: was hardcoded 31
@@ -243,9 +243,9 @@ def _chunk_bwd_kernel(
         dk_intra  = tl.dot(tl.trans(d_QK), q)
         dv        = tl.dot(tl.trans(QK * M), dout)
 
-        # FIX 3: d_b from rows of d_M (consistent with M = D * b[:, None])
-        d_D       = d_M * b[:, None]
-        d_b_intra = tl.sum(d_M * D, axis=1)      # sum over columns
+        # d_b from columns of d_M (consistent with M = D * b[None, :])
+        d_D       = d_M * b[None, :]
+        d_b_intra = tl.sum(d_M * D, axis=0)      # sum over rows (since b is columns)
 
         d_delta     = d_D * D
         d_cum_intra = tl.sum(d_delta, axis=1) - tl.sum(d_delta, axis=0)

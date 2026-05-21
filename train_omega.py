@@ -261,6 +261,8 @@ def train_model(model, name, max_steps, block_size, batch_size, grad_accum, devi
 def main():
     parser = argparse.ArgumentParser(description="Train OmegaGDM vs Top Transformer")
     parser.add_argument("--no-precheck", action="store_true", help="Skip dataset streaming pre-verification")
+    parser.add_argument("--only-omega", action="store_true", help="Train only the OmegaGDM architecture, skipping Transformer baseline")
+    parser.add_argument("--steps", type=int, default=500, help="Number of training steps")
     args = parser.parse_args()
 
     device = torch.device('cuda')
@@ -271,26 +273,29 @@ def main():
     else:
         print("[Dataset] Skipping dataset pre-verification check as requested.")
 
-    max_steps = 500
+    max_steps = args.steps
     grad_accum = 4
     batch_size = 8
     block_size = 2048
 
     # Model 1: LLaMA-3 Style Standard Transformer
-    transformer_model = TopTransformer(
-        vocab_size=256,
-        d_model=1024,
-        n_layers=12,
-        n_heads=16,
-        max_seq_len=2048
-    ).to(device)
-    
-    logs_trans, params_trans = train_model(
-        transformer_model, "Top Transformer (Baseline)", max_steps, block_size, batch_size, grad_accum, device
-    )
-    
-    del transformer_model
-    torch.cuda.empty_cache()
+    if not args.only_omega:
+        transformer_model = TopTransformer(
+            vocab_size=256,
+            d_model=1024,
+            n_layers=12,
+            n_heads=16,
+            max_seq_len=2048
+        ).to(device)
+        
+        logs_trans, params_trans = train_model(
+            transformer_model, "Top Transformer (Baseline)", max_steps, block_size, batch_size, grad_accum, device
+        )
+        
+        del transformer_model
+        torch.cuda.empty_cache()
+    else:
+        logs_trans, params_trans = None, None
 
     # Model 2: OmegaGDM V2.1
     omega_cfg = OmegaConfig(
@@ -315,32 +320,46 @@ def main():
     )
 
     # FINAL COMPARISON
-    print(f"\n{'='*100}")
-    print(f"FINAL COMPARISON: Top Transformer  vs  OmegaGDM")
-    print(f"{'='*100}")
-    
-    min_loss_t = min(l['loss'] for l in logs_trans)
-    min_loss_o = min(l['loss'] for l in logs_omega)
-    vram_t = max(l['vram_mb'] for l in logs_trans)
-    vram_o = max(l['vram_mb'] for l in logs_omega)
-    time_t = sum(l['step_time'] for l in logs_trans) / len(logs_trans)
-    time_o = sum(l['step_time'] for l in logs_omega) / len(logs_omega)
-    
-    def diff_str(v_base, v_new, is_lower_better=True):
-        if v_base == 0: return "N/A"
-        pct = ((v_new - v_base) / v_base) * 100
-        if is_lower_better:
-            return f"{-pct:.1f}% better" if pct < 0 else f"{pct:.1f}% worse"
-        return f"{pct:.1f}% larger" if pct > 0 else f"{-pct:.1f}% smaller"
+    if not args.only_omega and logs_trans is not None:
+        print(f"\n{'='*100}")
+        print(f"FINAL COMPARISON: Top Transformer  vs  OmegaGDM")
+        print(f"{'='*100}")
+        
+        min_loss_t = min(l['loss'] for l in logs_trans)
+        min_loss_o = min(l['loss'] for l in logs_omega)
+        vram_t = max(l['vram_mb'] for l in logs_trans)
+        vram_o = max(l['vram_mb'] for l in logs_omega)
+        time_t = sum(l['step_time'] for l in logs_trans) / len(logs_trans)
+        time_o = sum(l['step_time'] for l in logs_omega) / len(logs_omega)
+        
+        def diff_str(v_base, v_new, is_lower_better=True):
+            if v_base == 0: return "N/A"
+            pct = ((v_new - v_base) / v_base) * 100
+            if is_lower_better:
+                return f"{-pct:.1f}% better" if pct < 0 else f"{pct:.1f}% worse"
+            return f"{pct:.1f}% larger" if pct > 0 else f"{-pct:.1f}% smaller"
 
-    print(f"{'Metric':<28} | {'Top Transformer':<20} | {'OmegaGDM':<20} | {'OmegaGDM Improvement'}")
-    print("-" * 100)
-    print(f"{'Parameters':<28} | {params_trans/1e6:<18.2f} M | {params_omega/1e6:<18.2f} M | {diff_str(params_trans, params_omega, False)}")
-    print(f"{'Minimum Loss':<28} | {min_loss_t:<20.4f} | {min_loss_o:<20.4f} | {diff_str(min_loss_t, min_loss_o)}")
-    print(f"{'Final BPB':<28} | {logs_trans[-1]['bpb']:<20.4f} | {logs_omega[-1]['bpb']:<20.4f} | {diff_str(logs_trans[-1]['bpb'], logs_omega[-1]['bpb'])}")
-    print(f"{'Peak Net VRAM':<28} | {vram_t:<18}MB | {vram_o:<18}MB | {diff_str(vram_t, vram_o)}")
-    print(f"{'Avg Step Time':<28} | {time_t:<19.3f}s | {time_o:<19.3f}s | {diff_str(time_t, time_o)}")
-    print(f"{'='*100}")
+        print(f"{'Metric':<28} | {'Top Transformer':<20} | {'OmegaGDM':<20} | {'OmegaGDM Improvement'}")
+        print("-" * 100)
+        print(f"{'Parameters':<28} | {params_trans/1e6:<18.2f} M | {params_omega/1e6:<18.2f} M | {diff_str(params_trans, params_omega, False)}")
+        print(f"{'Minimum Loss':<28} | {min_loss_t:<20.4f} | {min_loss_o:<20.4f} | {diff_str(min_loss_t, min_loss_o)}")
+        print(f"{'Final BPB':<28} | {logs_trans[-1]['bpb']:<20.4f} | {logs_omega[-1]['bpb']:<20.4f} | {diff_str(logs_trans[-1]['bpb'], logs_omega[-1]['bpb'])}")
+        print(f"{'Peak Net VRAM':<28} | {vram_t:<18}MB | {vram_o:<18}MB | {diff_str(vram_t, vram_o)}")
+        print(f"{'Avg Step Time':<28} | {time_t:<19.3f}s | {time_o:<19.3f}s | {diff_str(time_t, time_o)}")
+        print(f"{'='*100}")
+    else:
+        print(f"\n{'='*100}")
+        print(f"TRAINING COMPLETE: OmegaGDM V2.1 (New)")
+        print(f"{'='*100}")
+        min_loss_o = min(l['loss'] for l in logs_omega)
+        vram_o = max(l['vram_mb'] for l in logs_omega)
+        time_o = sum(l['step_time'] for l in logs_omega) / len(logs_omega)
+        print(f"Parameters: {params_omega/1e6:.2f} M")
+        print(f"Minimum Loss: {min_loss_o:.4f}")
+        print(f"Final BPB: {logs_omega[-1]['bpb']:.4f}")
+        print(f"Peak Net VRAM: {vram_o} MB")
+        print(f"Avg Step Time: {time_o:.3f} s")
+        print(f"{'='*100}")
 
 if __name__ == "__main__":
     main()
