@@ -16,9 +16,9 @@ class OmegaConfig:
 
     d_model: int = 2048
     core_layers: int = 20
-    n_heads: int = 16
-    d_k: int = 64
-    d_v: int = 64
+    n_heads: int = 64
+    d_k: int = 32
+    d_v: int = 32
     d_ff: int = 8192
 
     decimation_rate: int = 8          # W = 8

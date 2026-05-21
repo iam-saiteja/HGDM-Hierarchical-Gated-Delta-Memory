@@ -48,12 +48,11 @@ def auto_detect_config(checkpoint_path):
     if "semantic_core.0.mixer.W_q.weight" in state_dict:
         shape = state_dict["semantic_core.0.mixer.W_q.weight"].shape
         total_q_dim = shape[0]
-        if total_q_dim % 64 == 0:
-            d_k = 64
-            n_heads = total_q_dim // 64
+        if "highway_bu_proj_k.weight" in state_dict:
+            d_k = state_dict["highway_bu_proj_k.weight"].shape[0]
         else:
-            d_k = 32
-            n_heads = total_q_dim // 32
+            d_k = 64 if total_q_dim % 64 == 0 else 32
+        n_heads = total_q_dim // d_k
             
     # 6. Detect d_ff from semantic_core.0.ffn.w1.weight shape [d_ff, d_model]
     if "semantic_core.0.ffn.w1.weight" in state_dict:
