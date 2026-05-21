@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
-from hgdm_ultimate import HGDMLayer, RMSNorm, HGDMConfig, CrossLayerStateFusion
+from ultimate.hgdm_ultimate import HGDMLayer, RMSNorm, HGDMConfig, CrossLayerStateFusion
 
 # =============================================================================
 # OMEGAGDM V2 — Hierarchical Temporal Decimation (Bugfixed)

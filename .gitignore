@@ -34,3 +34,7 @@ tensorboard/
 
 # Paper draft
 paper/
+
+# Local run logs and results
+train_1b_logs.jsonl
+interpretability_results/
