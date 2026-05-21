@@ -46,10 +46,8 @@ class TransformerLayer(nn.Module):
         self.wo = nn.Linear(d_model, d_model, bias=False)
         
         self.norm2 = RMSNorm(d_model)
-        # SwiGLU FFN: 8/3 * d_model, rounded to multiple of 128 for Tensor Core efficiency
+        # SwiGLU FFN: 8/3 * d_model
         hidden_dim = int(8 * d_model / 3)
-        multiple = 128
-        hidden_dim = multiple * ((hidden_dim + multiple - 1) // multiple)
         self.w1 = nn.Linear(d_model, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, d_model, bias=False)
         self.w3 = nn.Linear(d_model, hidden_dim, bias=False)
@@ -98,7 +96,7 @@ class TopTransformer(nn.Module):
         self.fc_out.weight = self.embed.weight
         
         # Precompute RoPE frequencies
-        theta = 10000.0 ** -(torch.arange(0, self.head_dim, 2).float() / self.head_dim)
+        theta = 10000.0 ** (-2.0 * (torch.arange(0, self.head_dim, 2).float() / self.head_dim))
         m = torch.arange(max_seq_len)
         freqs = torch.outer(m, theta)
         freqs_cis = torch.cat((freqs, freqs), dim=-1)
@@ -123,8 +121,6 @@ class TopTransformer(nn.Module):
         self.eval()
         generated = prompt_bytes
         for _ in range(max_new_bytes):
-            if generated.shape[1] >= self.cos.shape[2]:
-                break
             logits, _ = self.forward(generated)
             next_logit = logits[:, -1, :] / temp
             next_byte = torch.multinomial(F.softmax(next_logit, dim=-1), num_samples=1)
@@ -239,7 +235,6 @@ def train_model(model, name, max_steps, block_size, batch_size, grad_accum, devi
         opt.step()
         sched.step()
 
-        torch.cuda.synchronize()
         step_time = time.time() - t_step
         bpb = accum_loss / math.log(2)
 
@@ -276,7 +271,7 @@ def main():
     else:
         print("[Dataset] Skipping dataset pre-verification check as requested.")
 
-    max_steps = 100
+    max_steps = 500
     grad_accum = 4
     batch_size = 8
     block_size = 2048
