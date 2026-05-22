@@ -116,7 +116,7 @@ class MultiHeadGatedDelta(nn.Module):
         beta  = torch.sigmoid(self.W_beta(x))
         out_gate = torch.sigmoid(self.W_out_gate(x)).view(B, T, self.H, self.d_v)
 
-        if not self.force_sequential and fused_nitro_scan is not None:
+        if not self.force_sequential and fused_nitro_scan is not None and q.is_cuda:
             # FAST PATH: Triton Fused Kernel
             out, S = fused_nitro_scan(q, k, v, alpha, beta, state)
             out = out * out_gate
