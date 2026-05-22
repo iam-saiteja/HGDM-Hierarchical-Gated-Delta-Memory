@@ -242,15 +242,55 @@ def build_omega_model(ckpt_path: Optional[str], device: torch.device) -> OmegaGD
         decimation_rate=8, max_position_embeddings=2048,
         vocab_size=256, use_state_fusion=False,
     )
-    model = OmegaGDM(cfg, force_sequential=True).to(device)
+    
     if ckpt_path:
         sd = torch.load(ckpt_path, map_location=device)
         if isinstance(sd, dict) and 'model_state_dict' in sd:
             sd = sd['model_state_dict']
+        
+        # Dynamically auto-detect model configuration sizes from loaded state dict keys
+        try:
+            if 'decimator_proj.weight' in sd:
+                cfg.d_model = sd['decimator_proj.weight'].shape[0]
+            elif 'semantic_pos_embed' in sd:
+                cfg.d_model = sd['semantic_pos_embed'].shape[2]
+
+            core_indices = [int(k.split(".")[1]) for k in sd.keys() if k.startswith("semantic_core.") and ".mixer.W_q.weight" in k]
+            if core_indices:
+                cfg.core_layers = max(core_indices) + 1
+
+            catcher_indices = [int(k.split(".")[1]) for k in sd.keys() if k.startswith("byte_catcher.") and ".mixer.W_q.weight" in k]
+            if catcher_indices:
+                cfg.catcher_layers = max(catcher_indices) + 1
+
+            renderer_indices = [int(k.split(".")[1]) for k in sd.keys() if k.startswith("byte_renderer.") and ".mixer.W_q.weight" in k]
+            if renderer_indices:
+                cfg.renderer_layers = max(renderer_indices) + 1
+
+            first_core_prefix = "semantic_core.0"
+            if f"{first_core_prefix}.mixer.W_alpha.weight" in sd:
+                cfg.n_heads = sd[f"{first_core_prefix}.mixer.W_alpha.weight"].shape[0]
+            if f"{first_core_prefix}.mixer.W_q.weight" in sd:
+                cfg.d_k = sd[f"{first_core_prefix}.mixer.W_q.weight"].shape[0] // cfg.n_heads
+            if f"{first_core_prefix}.mixer.W_v.weight" in sd:
+                cfg.d_v = sd[f"{first_core_prefix}.mixer.W_v.weight"].shape[0] // cfg.n_heads
+            if f"{first_core_prefix}.ffn.w1.weight" in sd:
+                cfg.d_ff = sd[f"{first_core_prefix}.ffn.w1.weight"].shape[0]
+            if 'semantic_pos_embed' in sd:
+                cfg.max_position_embeddings = sd['semantic_pos_embed'].shape[1] * cfg.decimation_rate
+
+            print(f"[Probe] Auto-detected model config from checkpoint:")
+            print(f"        d_model={cfg.d_model}, core_layers={cfg.core_layers}, catcher_layers={cfg.catcher_layers}, renderer_layers={cfg.renderer_layers}")
+            print(f"        n_heads={cfg.n_heads}, d_k={cfg.d_k}, d_v={cfg.d_v}, d_ff={cfg.d_ff}, max_pos={cfg.max_position_embeddings}")
+        except Exception as e:
+            print(f"[Probe] Failed to auto-detect model config from checkpoint, using defaults: {e}")
+
+        model = OmegaGDM(cfg, force_sequential=True).to(device)
         model.load_state_dict(sd, strict=False)
         print(f"[Probe] Loaded checkpoint: {ckpt_path}")
     else:
         print("[Probe] No checkpoint — using random init (for demo / structure inspection).")
+        model = OmegaGDM(cfg, force_sequential=True).to(device)
     return model
 
 
