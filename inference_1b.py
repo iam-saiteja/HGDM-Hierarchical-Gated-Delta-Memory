@@ -82,33 +82,37 @@ def generate_text(model, prompt_text, device, max_new_bytes=200, temp=0.7):
     return decoded
 
 # =============================================================================
-# TEST 1: GPU Generation Suite
+# TEST 1: GPU/CPU Generation Suite
 # =============================================================================
 def test_gpu_generation(model, device):
     print(f"\n{'='*70}")
-    print(f"  TEST 1: GPU GENERATION (device={device})")
+    print(f"  TEST 1: GENERATION (device={device})")
     print(f"{'='*70}")
 
-    vram_before = get_gpu_memory()
-    print(f"  VRAM before generation: {vram_before} MB")
+    is_cuda = device.type == "cuda"
+    vram_before = get_gpu_memory() if is_cuda else -1
+    print(f"  VRAM before generation: {vram_before} MB" if is_cuda else "  VRAM tracking skipped (CPU)")
 
     for i, prompt in enumerate(PROMPTS):
-        torch.cuda.synchronize()
+        if is_cuda:
+            torch.cuda.synchronize()
         t0 = time.time()
         output = generate_text(model, prompt, device, max_new_bytes=200, temp=0.7)
-        torch.cuda.synchronize()
+        if is_cuda:
+            torch.cuda.synchronize()
         elapsed = time.time() - t0
 
-        vram_during = get_gpu_memory()
+        vram_during = get_gpu_memory() if is_cuda else -1
         bytes_generated = len(output.encode('utf-8', errors='ignore'))
 
         print(f"\n{'─'*70}")
-        print(f"  Prompt {i+1}  |  Time: {elapsed:.2f}s  |  VRAM: {vram_during} MB  |  Bytes: {bytes_generated}")
+        print(f"  Prompt {i+1}  |  Time: {elapsed:.2f}s" + (f"  |  VRAM: {vram_during} MB" if is_cuda else "") + f"  |  Bytes: {bytes_generated}")
         print(f"  INPUT  : {prompt!r}")
         print(f"  OUTPUT : {output!r}")
 
-    vram_after = get_gpu_memory()
-    print(f"\n  VRAM after all generations: {vram_after} MB")
+    if is_cuda:
+        vram_after = get_gpu_memory()
+        print(f"\n  VRAM after all generations: {vram_after} MB")
 
 # =============================================================================
 # TEST 2: O(1) Memory Per Step Proof — Varying Sequence Lengths
@@ -124,6 +128,7 @@ def test_o1_memory_scaling(model, device):
     prompt_lengths = [64, 128, 256, 512, 1024]
     gen_lengths = [50, 100, 200, 500]
 
+    is_cuda = device.type == "cuda"
     print(f"\n  {'Prompt Len':<12} | {'Gen Len':<9} | {'Gen Time':<10} | {'VRAM':<10} | {'Bytes/sec':<10}")
     print(f"  {'-'*60}")
 
@@ -134,19 +139,21 @@ def test_o1_memory_scaling(model, device):
             prompt_bytes = list(prompt.encode('utf-8', errors='ignore'))
             x = torch.tensor([prompt_bytes], dtype=torch.long, device=device)
 
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+            if is_cuda:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
 
             t0 = time.time()
             with torch.no_grad():
                 generated = model.generate(x, max_new_bytes=gen_len, temp=0.7)
-            torch.cuda.synchronize()
+            if is_cuda:
+                torch.cuda.synchronize()
             elapsed = time.time() - t0
 
-            vram_post = get_gpu_memory()
+            vram_post = f"{get_gpu_memory()} MB" if is_cuda else "N/A"
             bytes_per_sec = gen_len / elapsed if elapsed > 0 else 0
 
-            print(f"  {len(prompt_bytes):<12} | {gen_len:<9} | {elapsed:<10.2f}s | {vram_post:<10} MB | {bytes_per_sec:<10.1f}")
+            print(f"  {len(prompt_bytes):<12} | {gen_len:<9} | {elapsed:<10.2f}s | {vram_post:<10} | {bytes_per_sec:<10.1f}")
         print()  # blank line between prompt groups
 
     print(f"  KEY: If VRAM column stays ~constant across ALL rows,")
@@ -158,13 +165,18 @@ def test_o1_memory_scaling(model, device):
 # MAIN
 # =============================================================================
 def main():
-    device = torch.device('cuda')
-    assert torch.cuda.is_available(), "CUDA required."
+    import argparse
+    parser = argparse.ArgumentParser(description="OmegaGDM 1B Inference Benchmarks")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu", help="Device (cuda or cpu)")
+    parser.add_argument("--ckpt", default="hgdm_1b_latest.pt", help="Path to checkpoint .pt file")
+    args = parser.parse_args()
+
+    device = torch.device(args.device)
     print(f"[System] Using device: {device}")
 
-    model = load_model(device)
+    model = load_model(device, checkpoint_path=args.ckpt)
 
-    # TEST 1: GPU generation with VRAM tracking
+    # TEST 1: GPU/CPU generation with VRAM tracking
     test_gpu_generation(model, device)
 
     # TEST 2: O(1) memory proof
