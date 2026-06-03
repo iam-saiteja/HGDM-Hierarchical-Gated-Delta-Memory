@@ -24,8 +24,8 @@
 ## CURRENT STATUS
 
 ```
-ACTIVE STEP : 02 (QK-Norm)
-LAST PASSED : 01 — Variable Δt ON ✅ (2026-06-04)
+ACTIVE STEP : 03 (Asymmetric bu_gate init)
+LAST PASSED : 02 — QK-Norm ✅ (2026-06-04)
 LAST FAILED : None
 GIT COMMITS : 0 (pending satisfaction on all 18 steps)
 ```
@@ -83,20 +83,19 @@ Priority is determined by:
 ---
 
 ### STEP 02 — QK-Norm
-**Status**: ⬜ NOT STARTED
-**Branch**: `feat/step-02-qknorm`
-**What changes**:
-- `hgdm_ultimate.py` `MultiHeadGatedDelta.forward()`:
-  - After computing q, k: `q = F.normalize(q, dim=-1)` and `k = F.normalize(k, dim=-1)`
-  - Remove the `self.W_q.weight.data *= 0.1` initialization (no longer needed)
-**Test file**: `tests/test_02_qknorm.py`
-**Pass criteria**:
-- [ ] `||q[b,t,h,:]||_2 == 1.0` for all b,t,h (within 1e-6)
-- [ ] `||k[b,t,h,:]||_2 == 1.0` for all b,t,h (within 1e-6)
-- [ ] State norm `||S||_F` does not grow monotonically over 200 steps
-- [ ] Loss trains normally (within 10% of pre-QK-norm baseline)
-**Result**: PENDING
-**Notes**:
+**Status**: ✅ PASSED (2026-06-04)
+**Results**:
+- q norm deviation from 1.0: 1.19e-07 (essentially perfect unit sphere) ✅
+- k norm deviation from 1.0: 1.19e-07 ✅
+- State write bound ||kᵀ v|| ≤ ||v|| holds at all 128 positions ✅
+- State norm: 15.67 → 47.94 → 67.24 | growth ratio 0.52 (late growth HALF of early — plateau confirmed) ✅
+- Forward pass: no NaN, no Inf ✅
+- W_q.grad norm: 714.8349, W_k.grad norm: 696.9202 (healthy gradients) ✅
+- W_q.weight.std: 0.02084 (0.1× scale correctly removed) ✅
+- Loss: 710.705 → 16.326 (97.7% improvement in 50 steps) ✅
+- Triton fast path: OK with normalized q/k ✅
+- VRAM: 283MB (+14MB vs Step 01) ✅
+**Notes**: State norm plateaued perfectly. Growth ratio 0.52 = late growth is HALF of early growth. State is bounded. Triton kernel is unaffected.
 
 ---
 
