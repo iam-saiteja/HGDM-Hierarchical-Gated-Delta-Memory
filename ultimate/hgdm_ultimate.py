@@ -120,7 +120,11 @@ class MultiHeadGatedDelta(nn.Module):
         else:
             alpha = torch.sigmoid(self.W_alpha(x))
             
-        beta     = torch.sigmoid(self.W_beta(x))
+        # [STEP-07] Sparse Write Gate: shifted ReLU — only strong signals write to state
+        # beta < 0.1 → exactly 0 (write blocked), beta > 0.1 → rescaled to [0,1]
+        # Biological analogy: LTP threshold — weak signals are filtered, only strong ones consolidate
+        _beta_raw = torch.sigmoid(self.W_beta(x))
+        beta      = F.relu(_beta_raw - 0.1) / 0.9
         out_gate = torch.sigmoid(self.W_out_gate(x)).view(B, T, self.H, self.d_v)
 
         # [STEP-05] Unpack (S, n) state tuple, or init both to None for fresh start
