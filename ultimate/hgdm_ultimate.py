@@ -108,13 +108,11 @@ class MultiHeadGatedDelta(nn.Module):
     def forward(self, x, state=None):
         B, T, _ = x.shape
         # [STEP-02] QK-Norm: L2-normalize q and k to unit sphere before state update.
-        # Proof: ||k^T v||_F ≤ ||k||_2 * ||v||_2 = 1 * ||v||_2 = ||v||_2
-        # This bounds every incremental state write by the value norm — no state explosion.
         q = F.normalize(self.W_q(x).view(B, T, self.H, self.d_k), dim=-1)
         k = F.normalize(self.W_k(x).view(B, T, self.H, self.d_k), dim=-1)
         v = self.W_v(x).view(B, T, self.H, self.d_v)
         
-        # Advanced Feature 2: Variable-Delta-t ODE Decay
+        # Variable-Delta-t ODE Decay
         if getattr(self.config, "use_variable_delta_t", False):
             delta_t = F.softplus(self.W_delta(x)) + 1e-3
             lambdas = torch.exp(self.W_lambda)
@@ -122,26 +120,57 @@ class MultiHeadGatedDelta(nn.Module):
         else:
             alpha = torch.sigmoid(self.W_alpha(x))
             
-        beta  = torch.sigmoid(self.W_beta(x))
+        beta     = torch.sigmoid(self.W_beta(x))
         out_gate = torch.sigmoid(self.W_out_gate(x)).view(B, T, self.H, self.d_v)
 
-        if not self.force_sequential and fused_nitro_scan is not None and q.is_cuda:
-            # FAST PATH: Triton Fused Kernel
-            out, S = fused_nitro_scan(q, k, v, alpha, beta, state)
-            out = out * out_gate
-            out = out.reshape(B, T, -1)
-            return self.W_o(out), S
+        # [STEP-05] Unpack (S, n) state tuple, or init both to None for fresh start
+        if state is not None:
+            S_prev, n_prev = state
         else:
-            # SEQUENTIAL PATH: Pure PyTorch (O(T) memory and slow, but stable fallback)
-            S = state if state is not None else torch.zeros(B, self.H, self.d_k, self.d_v, device=x.device, dtype=x.dtype)
+            S_prev, n_prev = None, None
+
+        if not self.force_sequential and fused_nitro_scan is not None and q.is_cuda:
+            # FAST PATH: Triton kernel handles the expensive S recurrence
+            out, S = fused_nitro_scan(q, k, v, alpha, beta, S_prev)
+
+            # [STEP-05] n_t recurrence in PyTorch — cheap O(T*H*d_k), no kernel change needed
+            # n_t = alpha_t * n_{t-1} + beta_t * k_t  (tracks write accumulation per key dim)
+            n = n_prev if n_prev is not None else torch.zeros(B, self.H, self.d_k, device=x.device, dtype=x.dtype)
+            n_list = []
+            for t in range(T):
+                n = alpha[:, t, :, None] * n + beta[:, t, :, None] * k[:, t]
+                n_list.append(n)
+            n_stack = torch.stack(n_list, dim=1)  # [B, T, H, d_k]
+
+            # [STEP-05] Normalize: out = (q @ S) / max(||n||_inf, 1)
+            n_inf  = n_stack.abs().max(dim=-1)[0]                # [B, T, H]
+            denom  = torch.clamp(n_inf, min=1.0).unsqueeze(-1)   # [B, T, H, 1]
+            # [STEP-06] Epistemic gate: confidence = tanh(||n||_2) per head
+            # Fresh state (n=0): conf=0 → model is silent (no hallucination at start)
+            # Rich state (n large): conf→1 → full output
+            conf   = torch.tanh(n_stack.norm(dim=-1)).unsqueeze(-1)  # [B, T, H, 1]
+            out    = (out / denom) * out_gate * conf
+            out    = out.reshape(B, T, -1)
+            return self.W_o(out), (S, n)
+
+        else:
+            # SEQUENTIAL PATH: Pure PyTorch fallback
+            S = S_prev if S_prev is not None else torch.zeros(B, self.H, self.d_k, self.d_v, device=x.device, dtype=x.dtype)
+            n = n_prev if n_prev is not None else torch.zeros(B, self.H, self.d_k, device=x.device, dtype=x.dtype)
             outputs = []
             for t in range(T):
                 delta = torch.einsum('bhk,bhd->bhkd', k[:, t], v[:, t])
                 S = alpha[:, t, :, None, None] * S + beta[:, t, :, None, None] * delta
-                out_t = torch.einsum('bhkd,bhk->bhd', S, q[:, t]) * out_gate[:, t]
+                # [STEP-05] n_t update + normalize
+                n = alpha[:, t, :, None] * n + beta[:, t, :, None] * k[:, t]
+                n_inf  = n.abs().max(dim=-1)[0]                    # [B, H]
+                denom  = torch.clamp(n_inf, min=1.0).unsqueeze(-1) # [B, H, 1]
+                # [STEP-06] Epistemic gate per head
+                conf   = torch.tanh(n.norm(dim=-1)).unsqueeze(-1)   # [B, H, 1]
+                out_t  = torch.einsum('bhkd,bhk->bhd', S, q[:, t]) / denom * out_gate[:, t] * conf
                 outputs.append(out_t)
             out = torch.stack(outputs, dim=1).reshape(B, T, -1)
-            return self.W_o(out), S
+            return self.W_o(out), (S, n)
 
 class HGDMLayer(nn.Module):
     def __init__(self, config: HGDMConfig, layer_idx: int, force_sequential=False):

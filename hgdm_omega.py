@@ -94,24 +94,32 @@ class OmegaGDM(nn.Module):
         self.fc_out.weight = self.embedding.weight
 
     def _apply_td_highway(self, S_core_last, renderer_state_0):
-        B = S_core_last.shape[0]
-        S_mean = S_core_last.mean(dim=1)
+        # [STEP-05] State is now (S, n) tuple — extract S matrix for highway projection
+        S_core = S_core_last[0] if isinstance(S_core_last, tuple) else S_core_last
+        ren_S  = renderer_state_0[0] if isinstance(renderer_state_0, tuple) else renderer_state_0
+        ren_n  = renderer_state_0[1] if isinstance(renderer_state_0, tuple) else None
+        B = S_core.shape[0]
+        S_mean = S_core.mean(dim=1)
         S_mean = self.highway_td_norm(S_mean.reshape(B, -1)).reshape(B, self._core_hw_shape[1], self._core_hw_shape[2])
         S_proj = self.highway_td_proj_k(S_mean.transpose(-1, -2)).transpose(-1, -2)
         S_proj = self.highway_td_proj_v(S_proj).unsqueeze(1).expand(-1, self._ren_hw_shape[0], -1, -1)
         gate = torch.sigmoid(self.highway_td_gate)[None, :, None, None]
-        if renderer_state_0 is None: return gate * S_proj
-        return renderer_state_0 + gate * S_proj
+        new_S = gate * S_proj if ren_S is None else ren_S + gate * S_proj
+        return (new_S, ren_n)  # return (S, n) tuple to keep state format consistent
 
     def _apply_bu_highway(self, S_renderer_last, core_state_0):
-        B = S_renderer_last.shape[0]
-        S_mean = S_renderer_last.mean(dim=1)
+        # [STEP-05] State is now (S, n) tuple — extract S matrix for highway projection
+        S_ren  = S_renderer_last[0] if isinstance(S_renderer_last, tuple) else S_renderer_last
+        core_S = core_state_0[0] if isinstance(core_state_0, tuple) else core_state_0
+        core_n = core_state_0[1] if isinstance(core_state_0, tuple) else None
+        B = S_ren.shape[0]
+        S_mean = S_ren.mean(dim=1)
         S_mean = self.highway_bu_norm(S_mean.reshape(B, -1)).reshape(B, self._ren_hw_shape[1], self._ren_hw_shape[2])
         S_proj = self.highway_bu_proj_k(S_mean.transpose(-1, -2)).transpose(-1, -2)
         S_proj = self.highway_bu_proj_v(S_proj).unsqueeze(1).expand(-1, self._core_hw_shape[0], -1, -1)
         gate = torch.sigmoid(self.highway_bu_gate)[None, :, None, None]
-        if core_state_0 is None: return gate * S_proj
-        return core_state_0 + gate * S_proj
+        new_S = gate * S_proj if core_S is None else core_S + gate * S_proj
+        return (new_S, core_n)  # return (S, n) tuple to keep state format consistent
 
     def forward(self, byte_seq, states=None, offset=0):
         B, T = byte_seq.shape
