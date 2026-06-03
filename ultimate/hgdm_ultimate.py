@@ -56,12 +56,18 @@ class MultiHeadGatedDelta(nn.Module):
         self.W_k = nn.Linear(config.d_model, self.H * self.d_k, bias=False)
         self.W_v = nn.Linear(config.d_model, self.H * self.d_v, bias=False)
         
-        # Advanced Feature 2: Variable-Delta-t Continuous Decay
+        # [STEP-04] Asymmetric Decay Init: cortical half/half split
+        # Fast heads (h < H//2): τ = 4*(h+1)  → short timescales [4, 8, 12, ...]
+        # Slow heads (h >= H//2): τ = 200*(h-H//2+1) → long timescales [200, 400, 600, ...]
+        # Replaces cyclic base_taus which arbitrarily mixed timescales across heads.
         if getattr(config, "use_variable_delta_t", False):
-            base_taus = [4.0, 30.0, 200.0, 1200.0, 8000.0]
             initial_lambdas = []
+            H_half = self.H // 2
             for h in range(self.H):
-                tau = base_taus[h % len(base_taus)]
+                if h < H_half:
+                    tau = 4.0 * (h + 1)           # fast: 4, 8, 12, 16, 24, ...
+                else:
+                    tau = 200.0 * (h - H_half + 1) # slow: 200, 400, 600, 800, ...
                 initial_lambdas.append(1.0 / tau)
             self.W_lambda = nn.Parameter(torch.log(torch.tensor(initial_lambdas, dtype=torch.float32)))
             self.W_delta = nn.Linear(config.d_model, self.H, bias=True)
