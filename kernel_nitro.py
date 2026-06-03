@@ -20,27 +20,9 @@ Corrections from v9:
      dinitial_state (gradient with respect to initial state S_prev).
 """
 import torch
+import triton
+import triton.language as tl
 import math
-
-try:
-    import triton
-    import triton.language as tl
-    HAS_TRITON = True
-except ImportError:
-    HAS_TRITON = False
-    # Mock triton and tl so the module compiles on systems without Triton (e.g., Windows)
-    class MockTriton:
-        def jit(self, *args, **kwargs):
-            if len(args) == 1 and callable(args[0]):
-                return args[0]
-            return lambda f: f
-    triton = MockTriton()
-    
-    class MockTL:
-        constexpr = object()
-        def __getattr__(self, name):
-            return object()
-    tl = MockTL()
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -460,9 +442,4 @@ def fused_nitro_scan(q, k, v, alpha, beta, state=None, chunk_size=_DEFAULT_CHUNK
         state    : optional initial state (B, H, d_k, d_v)
         chunk_size: int, must be power of 2 (default 32)
     """
-    if not HAS_TRITON:
-        return None
     return FusedNitroEngine.apply(q, k, v, alpha, beta, state, chunk_size)
-
-if not HAS_TRITON:
-    fused_nitro_scan = None

@@ -26,7 +26,7 @@ class OmegaConfig:
     max_position_embeddings: int = 65536
 
     use_state_fusion: bool = False
-    use_variable_delta_t: bool = False
+    use_variable_delta_t: bool = True   # [STEP-01] Time-based model: content-driven Δt decay (CfC/Mamba)
 
 class CausalBroadcaster(nn.Module):
     def __init__(self, config: OmegaConfig):

@@ -18,7 +18,7 @@ class HGDMConfig:
     d_v: int = 64              
     d_ff: int = 3072           
     vocab_size: int = 256      
-    use_variable_delta_t: bool = False  # Feature 2: Variable-Delta-t Decay
+    use_variable_delta_t: bool = True   # [STEP-01] Time-based model: content-driven Δt decay (CfC/Mamba)
     use_state_fusion: bool = False      # Feature 6: Cross-Layer State Fusion (State Highways)
     max_position_embeddings: int = 2048 # Bug 2 Fix: Configurable positional embedding size (saves 201MB VRAM by default)
 
@@ -92,8 +92,8 @@ class MultiHeadGatedDelta(nn.Module):
                 self.W_alpha.bias.copy_(torch.tensor(biases))
                 torch.nn.init.normal_(self.W_alpha.weight, mean=0.0, std=0.02) 
 
-            self.W_q.weight.data *= 0.1
-            self.W_k.weight.data *= 0.1
+            # [STEP-02] QK-Norm makes W_q/W_k scale irrelevant (output is always unit-norm)
+            # Removed: self.W_q.weight.data *= 0.1 and self.W_k.weight.data *= 0.1
             self.W_beta.weight.zero_()
             self.W_beta.bias.fill_(-1.0) 
             self.W_out_gate.weight.zero_()
@@ -101,8 +101,11 @@ class MultiHeadGatedDelta(nn.Module):
 
     def forward(self, x, state=None):
         B, T, _ = x.shape
-        q = self.W_q(x).view(B, T, self.H, self.d_k)
-        k = self.W_k(x).view(B, T, self.H, self.d_k)
+        # [STEP-02] QK-Norm: L2-normalize q and k to unit sphere before state update.
+        # Proof: ||k^T v||_F ≤ ||k||_2 * ||v||_2 = 1 * ||v||_2 = ||v||_2
+        # This bounds every incremental state write by the value norm — no state explosion.
+        q = F.normalize(self.W_q(x).view(B, T, self.H, self.d_k), dim=-1)
+        k = F.normalize(self.W_k(x).view(B, T, self.H, self.d_k), dim=-1)
         v = self.W_v(x).view(B, T, self.H, self.d_v)
         
         # Advanced Feature 2: Variable-Delta-t ODE Decay
