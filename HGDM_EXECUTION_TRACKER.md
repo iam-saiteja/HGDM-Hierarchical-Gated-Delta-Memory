@@ -24,10 +24,10 @@
 ## CURRENT STATUS
 
 ```
-ACTIVE STEP : 04 (Asymmetric Decay Init)
-LAST PASSED : 03 — Asymmetric bu_gate init ✅ (2026-06-04)
+ACTIVE STEP : 06 (Epistemic Gating)
+LAST PASSED : 05 — State Normalizer ✅ (2026-06-04)
 LAST FAILED : None
-GIT COMMITS : 1 (4b18289 — step-01+02+03)
+GIT COMMITS : 2 (4b18289, 682230c, ef038eb)
 ```
 
 ---
