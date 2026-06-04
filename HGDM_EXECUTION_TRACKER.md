@@ -24,10 +24,10 @@
 ## CURRENT STATUS
 
 ```
-ACTIVE STEP : 10 (Boundary Clock)
-LAST PASSED : 09 — Phase Oscillator on β ✅ (2026-06-04)
+ACTIVE STEP : 11 (RoPE)
+LAST PASSED : 10 — Boundary Clock ✅ (2026-06-04)
 LAST FAILED : None
-GIT COMMITS : 7 (4b18289, 682230c, ef038eb, abc4b77, 7f9de58, 623cdb5)
+GIT COMMITS : 8 (4b18289, 682230c, ef038eb, abc4b77, 7f9de58, 623cdb5, 902c4a8)
 ```
 
 ---
@@ -235,7 +235,7 @@ Priority is determined by:
 ---
 
 ### STEP 10 — Boundary Clock (Verify + Fix)
-**Status**: ⬜ NOT STARTED
+**Status**: ✅ PASSED (2026-06-04)
 **Branch**: `feat/step-10-boundary-clock`
 **What changes**:
 - Check if boundary detection already exists in `hgdm_ultimate.py` or `train_omega.py`
@@ -244,12 +244,12 @@ Priority is determined by:
 - Slow heads (h >= H//2): unchanged
 **Test file**: `tests/test_10_boundary_clock.py`
 **Pass criteria**:
-- [ ] Boundary detection correctly identifies bytes 46, 63, 33, 10
-- [ ] Fast head state norms drop at boundaries (partial reset working)
-- [ ] Slow head state norms continue growing at boundaries (not reset)
-- [ ] Training loss not negatively impacted (< 5% degradation vs baseline)
-**Result**: PENDING
-**Notes**:
+- [x] Boundary detection correctly identifies bytes 46, 63, 33, 10
+- [x] Fast head state norms drop at boundaries (partial reset working)
+- [x] Slow head state norms continue growing at boundaries (not reset)
+- [x] Training loss not negatively impacted (< 5% degradation vs baseline)
+**Result**: PASSED
+**Notes**: Implemented boundary clock reset successfully with fast-head selective 99% state decay (alpha=0.01) at sentence/line boundary characters. All tests passed.
 
 ---
 

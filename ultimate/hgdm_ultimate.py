@@ -114,7 +114,7 @@ class MultiHeadGatedDelta(nn.Module):
             self.W_out_gate.weight.zero_()
             self.W_out_gate.bias.zero_()
 
-    def forward(self, x, state=None):
+    def forward(self, x, state=None, boundary_mask=None):
         B, T, _ = x.shape
         # [STEP-02] QK-Norm: L2-normalize q and k to unit sphere before state update.
         q = F.normalize(self.W_q(x).view(B, T, self.H, self.d_k), dim=-1)
@@ -128,6 +128,13 @@ class MultiHeadGatedDelta(nn.Module):
             alpha = torch.exp(-delta_t * lambdas[None, None, :])
         else:
             alpha = torch.sigmoid(self.W_alpha(x))
+            
+        # [STEP-10] Boundary Clock: selectively reset fast heads (h < H//2) at boundaries
+        if boundary_mask is not None:
+            H_half = self.H // 2
+            fast_head_mask = torch.arange(self.H, device=x.device)[None, None, :] < H_half
+            reset_mask = boundary_mask[:, :, None] & fast_head_mask
+            alpha = torch.where(reset_mask, torch.full_like(alpha, 0.01), alpha)
             
         # [STEP-07] Sparse Write Gate: shifted ReLU — only strong signals write to state
         _beta_raw = torch.sigmoid(self.W_beta(x))
@@ -198,8 +205,8 @@ class HGDMLayer(nn.Module):
         self.norm2 = RMSNorm(config.d_model)
         self.ffn = SwiGLU(config.d_model, config.d_ff)
         
-    def forward(self, x, state=None):
-        m_out, new_mixer_state = self.mixer(self.norm1(x), state=state)
+    def forward(self, x, state=None, boundary_mask=None):
+        m_out, new_mixer_state = self.mixer(self.norm1(x), state=state, boundary_mask=boundary_mask)
         x = x + m_out
         x = x + self.ffn(self.norm2(x))
         return x, new_mixer_state
@@ -244,6 +251,10 @@ class HGDMUltimate(nn.Module):
         B, T = byte_seq.shape
         x = self.embedding(byte_seq)
         
+        # [STEP-10] Boundary Clock: detect sentence/line boundaries
+        # '.', '?', '!', '\n' correspond to byte values 46, 63, 33, 10
+        boundary_mask = (byte_seq == 46) | (byte_seq == 63) | (byte_seq == 33) | (byte_seq == 10)
+        
         # Bug 2 Wrap-around check: Allow arbitrary token offsets during generation without out-of-bounds errors
         pos_offset = offset % self.pos_embedding.shape[1]
         if pos_offset + T > self.pos_embedding.shape[1]:
@@ -257,7 +268,7 @@ class HGDMUltimate(nn.Module):
         prev_state = None
         
         for i, layer in enumerate(self.layers):
-            x, ns = layer(x, states[i])
+            x, ns = layer(x, states[i], boundary_mask=boundary_mask)
             # Bug 3 Fix: Track raw unfused recurrent state to prevent cascade explosion
             unfused_ns = ns
             
