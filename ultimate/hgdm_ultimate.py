@@ -74,8 +74,11 @@ class MultiHeadGatedDelta(nn.Module):
         else:
             self.W_alpha = nn.Linear(config.d_model, self.H)
             
-        self.W_beta  = nn.Linear(config.d_model, self.H)
-        self.W_out_gate = nn.Linear(config.d_model, self.H * self.d_v)
+        self.W_beta      = nn.Linear(config.d_model, self.H)
+        # [STEP-08] Per-head write scale: exp(log_beta_scale_h) multiplies beta for head h
+        # Starts at 0 → exp(0)=1 → no change at init. Learned divergence during training.
+        self.log_beta_scale = nn.Parameter(torch.zeros(self.H))
+        self.W_out_gate  = nn.Linear(config.d_model, self.H * self.d_v)
         self.W_o = nn.Linear(self.H * self.d_v, config.d_model, bias=False)
         
         self._initialize_weights()
@@ -121,10 +124,10 @@ class MultiHeadGatedDelta(nn.Module):
             alpha = torch.sigmoid(self.W_alpha(x))
             
         # [STEP-07] Sparse Write Gate: shifted ReLU — only strong signals write to state
-        # beta < 0.1 → exactly 0 (write blocked), beta > 0.1 → rescaled to [0,1]
-        # Biological analogy: LTP threshold — weak signals are filtered, only strong ones consolidate
         _beta_raw = torch.sigmoid(self.W_beta(x))
         beta      = F.relu(_beta_raw - 0.1) / 0.9
+        # [STEP-08] Per-head write scale: each head has independent amplitude control
+        beta      = beta * torch.exp(self.log_beta_scale)[None, None, :]
         out_gate = torch.sigmoid(self.W_out_gate(x)).view(B, T, self.H, self.d_v)
 
         # [STEP-05] Unpack (S, n) state tuple, or init both to None for fresh start

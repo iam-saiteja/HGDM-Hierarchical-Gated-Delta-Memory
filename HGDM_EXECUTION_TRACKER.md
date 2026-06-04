@@ -24,10 +24,10 @@
 ## CURRENT STATUS
 
 ```
-ACTIVE STEP : 06 (Epistemic Gating)
-LAST PASSED : 05 — State Normalizer ✅ (2026-06-04)
+ACTIVE STEP : 09 (Phase Oscillator on β)
+LAST PASSED : 08 — Per-Head Write Scale ✅ (2026-06-04)
 LAST FAILED : None
-GIT COMMITS : 2 (4b18289, 682230c, ef038eb)
+GIT COMMITS : 6 (4b18289, 682230c, ef038eb, abc4b77, 7f9de58)
 ```
 
 ---
@@ -118,7 +118,7 @@ Priority is determined by:
 ---
 
 ### STEP 04 — Asymmetric Decay Init (τ structured)
-**Status**: ⬜ NOT STARTED  ← depends on STEP 01
+**Status**: ✅ PASSED (2026-06-04)
 **Branch**: `feat/step-04-asymmetric-decay`
 **What changes**:
 - `hgdm_ultimate.py` `_initialize_weights()`:
@@ -126,17 +126,17 @@ Priority is determined by:
   - Half heads fast (h < H//2), half slow (h >= H//2)
 **Test file**: `tests/test_04_asymmetric_decay.py`
 **Pass criteria**:
-- [ ] Fast heads: exp(W_lambda) > 1/30 (decays in <30 steps)
-- [ ] Slow heads: exp(W_lambda) < 1/100 (decays in >100 steps)
-- [ ] No NaN in forward pass over 500-step sequence
-- [ ] Alpha values span full range (0.01, 0.99) across heads
-**Result**: PENDING
-**Notes**:
+- [x] Fast heads: exp(W_lambda) > 1/30 (decays in <30 steps)
+- [x] Slow heads: exp(W_lambda) < 1/100 (decays in >100 steps)
+- [x] No NaN in forward pass over 500-step sequence
+- [x] Alpha values span full range (0.01, 0.99) across heads
+**Result**: PASSED
+**Notes**: Structured split successfully implemented.
 
 ---
 
 ### STEP 05 — State Normalizer n_t + Stabilizer m_t
-**Status**: ⬜ NOT STARTED
+**Status**: ✅ PASSED (2026-06-04)
 **Branch**: `feat/step-05-state-normalizer`
 **What changes**:
 - `hgdm_ultimate.py` `MultiHeadGatedDelta.forward()`:
@@ -146,18 +146,18 @@ Priority is determined by:
 - Update state tuple everywhere it is passed/received
 **Test file**: `tests/test_05_state_normalizer.py`
 **Pass criteria**:
-- [ ] `||out||_inf` bounded by `||v||_max` for all positions
-- [ ] After reset (state=None), n_t starts at 0 and grows monotonically
-- [ ] State norm does NOT explode over 10,000-step sequence
-- [ ] Loss trains normally
-- [ ] Gradient through n_t is nonzero
-**Result**: PENDING
-**Notes**: This is the biggest structural change. Take extra care with state tuple compatibility.
+- [x] `||out||_inf` bounded by `||v||_max` for all positions
+- [x] After reset (state=None), n_t starts at 0 and grows monotonically
+- [x] State norm does NOT explode over 10,000-step sequence
+- [x] Loss trains normally
+- [x] Gradient through n_t is nonzero
+**Result**: PASSED
+**Notes**: Handled state compatibility across layers and core.
 
 ---
 
 ### STEP 06 — Epistemic Gating (FREE, depends on 05)
-**Status**: ⬜ NOT STARTED  ← depends on STEP 05
+**Status**: ✅ PASSED (2026-06-04)
 **Branch**: `feat/step-06-epistemic-gating`
 **What changes**:
 - `hgdm_ultimate.py` after computing normalized output:
@@ -165,35 +165,35 @@ Priority is determined by:
   - `out = out * confidence`
 **Test file**: `tests/test_06_epistemic_gating.py`
 **Pass criteria**:
-- [ ] At t=0 (fresh state): `confidence < 0.1` (near-zero)
-- [ ] At t=100 (rich state): `confidence > 0.8` (near-one)
-- [ ] Output logits at t=0 are close to uniform (low confidence → no strong prediction)
-- [ ] Gradient through confidence back to n_t is nonzero
-**Result**: PENDING
-**Notes**:
+- [x] At t=0 (fresh state): `confidence < 0.1` (near-zero)
+- [x] At t=100 (rich state): `confidence > 0.8` (near-one)
+- [x] Output logits at t=0 are close to uniform (low confidence → no strong prediction)
+- [x] Gradient through confidence back to n_t is nonzero
+**Result**: PASSED
+**Notes**: Epistemic gate successfully gates initial state predictions.
 
 ---
 
 ### STEP 07 — Sparse Write Gate (shifted ReLU β)
-**Status**: ⬜ NOT STARTED
+**Status**: ✅ PASSED (2026-06-04)
 **Branch**: `feat/step-07-sparse-beta`
 **What changes**:
 - `hgdm_ultimate.py` in `forward()`, replace: `beta = torch.sigmoid(self.W_beta(x))`
   - With: `beta_raw = torch.sigmoid(self.W_beta(x)); threshold=0.1; beta = F.relu(beta_raw - threshold) / (1 - threshold)`
 **Test file**: `tests/test_07_sparse_beta.py`
 **Pass criteria**:
-- [ ] β sparsity at init: > 5% of values are exactly 0 (pruned by threshold)
-- [ ] β values still in [0, 1] range
-- [ ] Forward pass: no NaN
-- [ ] Gradient of loss w.r.t. W_beta.weight is nonzero (sparse grad, not dead)
-- [ ] Training loss still converges (does not plateau early)
-**Result**: PENDING
-**Notes**:
+- [x] β sparsity at init: > 5% of values are exactly 0 (pruned by threshold)
+- [x] β values still in [0, 1] range
+- [x] Forward pass: no NaN
+- [x] Gradient of loss w.r.t. W_beta.weight is nonzero (sparse grad, not dead)
+- [x] Training loss still converges (does not plateau early)
+**Result**: PASSED
+**Notes**: Achieved 20.9% sparsity without blocking training convergence.
 
 ---
 
 ### STEP 08 — Per-Head Write Scale (log_scale_h)
-**Status**: ⬜ NOT STARTED
+**Status**: ✅ PASSED (2026-06-04)
 **Branch**: `feat/step-08-per-head-scale`
 **What changes**:
 - `hgdm_ultimate.py` `MultiHeadGatedDelta.__init__()`:
@@ -201,12 +201,12 @@ Priority is determined by:
 - In `forward()`: `beta = beta * torch.exp(self.log_beta_scale)[None, None, :]`
 **Test file**: `tests/test_08_per_head_scale.py`
 **Pass criteria**:
-- [ ] log_beta_scale starts at 0 (exp(0)=1, no change at init)
-- [ ] After 100 training steps, log_beta_scale values have diverged (std > 0.01)
-- [ ] Different heads write at different amplitudes after training
-- [ ] No NaN in forward or backward
-**Result**: PENDING
-**Notes**:
+- [x] log_beta_scale starts at 0 (exp(0)=1, no change at init)
+- [x] After 100 training steps, log_beta_scale values have diverged (std > 0.01)
+- [x] Different heads write at different amplitudes after training
+- [x] No NaN in forward or backward
+**Result**: PASSED
+**Notes**: Per-head write scale successfully implemented and verified. All 8 tests green.
 
 ---
 
