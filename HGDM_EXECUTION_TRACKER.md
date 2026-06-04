@@ -24,10 +24,10 @@
 ## CURRENT STATUS
 
 ```
-ACTIVE STEP : 13 (Input-Dependent Highway Gate)
-LAST PASSED : 12 — Content-Aware Decimation ✅ (2026-06-04)
+ACTIVE STEP : 14 (Multi-Token Prediction K=4)
+LAST PASSED : 13 — Input-Dependent Highway Gate ✅ (2026-06-04)
 LAST FAILED : None
-GIT COMMITS : 10 (4b18289, 682230c, ef038eb, abc4b77, 7f9de58, 623cdb5, 902c4a8, 379c9ee, c79d642)
+GIT COMMITS : 11 (4b18289, 682230c, ef038eb, abc4b77, 7f9de58, 623cdb5, 902c4a8, 379c9ee, c79d642, ebc13fa)
 ```
 
 ---
@@ -300,21 +300,23 @@ Priority is determined by:
 ---
 
 ### STEP 13 — Input-Dependent Highway Gate (Content Gate)
-**Status**: ⬜ NOT STARTED
+**Status**: ✅ PASSED (2026-06-04)
 **Branch**: `feat/step-13-content-highway`
 **What changes**:
 - `hgdm_omega.py` in `OmegaGDM.__init__()`:
-  - Add `self.td_gate_net = nn.Linear(config.d_model, H_ren, bias=True)` initialized to produce near-zero
-  - Add `self.bu_gate_net = nn.Linear(config.d_byte, H_core, bias=True)` initialized to produce near-zero
+  - Add `self.td_gate_net = nn.Linear(config.d_model, H_ren, bias=True)` initialized to produce near-zero (weight=0, bias=-4.0)
+  - Add `self.bu_gate_net = nn.Linear(config.d_byte, H_core, bias=True)` initialized to produce near-zero (weight=0, bias=-2.0)
 - In `_apply_td_highway()` and `_apply_bu_highway()`: replace scalar gate with content-dependent gate
+- Pass content vectors to these functions in both batch and step paths of `forward()`.
 **Test file**: `tests/test_13_content_highway.py`
 **Pass criteria**:
-- [ ] Highway gate responds to input: different inputs → different gate values
-- [ ] Gate still in (0,1) (sigmoid output)
-- [ ] No NaN
-- [ ] Gradient through highway gate net is nonzero
-**Result**: PENDING
-**Notes**:
+- [x] Gate networks exist and are correctly initialized to near-zero
+- [x] Highway gates respond dynamically in batch mode and are in (0,1)
+- [x] Highway gates respond dynamically in step-by-step mode and are in (0,1)
+- [x] Gradient: nonzero gradients flow to td_gate_net and bu_gate_net
+- [x] Training: loss decreases and converges without NaNs
+**Result**: PASSED
+**Notes**: Completed and verified on remote GPU server. All 5 tests green.
 
 ---
 

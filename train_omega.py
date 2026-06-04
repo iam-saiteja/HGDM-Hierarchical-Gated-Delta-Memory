@@ -221,8 +221,18 @@ def train_model(model, name, max_steps, block_size, batch_size, grad_accum, devi
             x, y = batch[:, :-1], batch[:, 1:]
 
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                logits, _ = model(x)
-                loss = F.cross_entropy(logits.reshape(-1, 256), y.reshape(-1)) / grad_accum
+                if isinstance(model, OmegaGDM):
+                    logits_list, _ = model(x, return_mtp=True)
+                    loss = 0.0
+                    for k, logits in enumerate(logits_list):
+                        if k == 0:
+                            loss = loss + F.cross_entropy(logits.reshape(-1, 256), y.reshape(-1))
+                        else:
+                            loss = loss + F.cross_entropy(logits[:, :-k].reshape(-1, 256), y[:, k:].reshape(-1))
+                    loss = loss / grad_accum
+                else:
+                    logits, _ = model(x)
+                    loss = F.cross_entropy(logits.reshape(-1, 256), y.reshape(-1)) / grad_accum
 
             if torch.isnan(loss) or torch.isinf(loss):
                 print(f"[ERROR] NaN/Inf loss at step {step}.")

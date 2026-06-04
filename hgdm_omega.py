@@ -84,12 +84,20 @@ class OmegaGDM(nn.Module):
         self.highway_td_norm   = RMSNorm(dk_core * dv_core)
         self.highway_td_proj_k = nn.Linear(dk_core, dk_ren, bias=False)
         self.highway_td_proj_v = nn.Linear(dv_core, dv_ren, bias=False)
-        self.highway_td_gate   = nn.Parameter(torch.full((H_ren,), -4.0))
+        # [STEP-13] Content-dependent TD highway gate network
+        self.td_gate_net = nn.Linear(config.d_model, H_ren, bias=True)
+        with torch.no_grad():
+            self.td_gate_net.weight.zero_()
+            self.td_gate_net.bias.fill_(-4.0)
 
         self.highway_bu_norm   = RMSNorm(dk_ren * dv_ren)
         self.highway_bu_proj_k = nn.Linear(dk_ren, dk_core, bias=False)
         self.highway_bu_proj_v = nn.Linear(dv_ren, dv_core, bias=False)
-        self.highway_bu_gate   = nn.Parameter(torch.full((H_core,), -2.0))  # [STEP-03] Asymmetric init: bu gets -2.0 (sigmoid≈0.12) vs td -4.0 (sigmoid≈0.018). Compensates for 8× time compression of semantic core.
+        # [STEP-13] Content-dependent BU highway gate network
+        self.bu_gate_net = nn.Linear(config.d_byte, H_core, bias=True)
+        with torch.no_grad():
+            self.bu_gate_net.weight.zero_()
+            self.bu_gate_net.bias.fill_(-2.0)
 
         self._core_hw_shape = (H_core, dk_core, dv_core)
         self._ren_hw_shape  = (H_ren,  dk_ren,  dv_ren)
@@ -109,35 +117,58 @@ class OmegaGDM(nn.Module):
             self.boundary_head.weight.zero_()
             self.boundary_head.bias.fill_(-2.08)
 
-    def _apply_td_highway(self, S_core_last, renderer_state_0):
+        # [STEP-14] Multi-Token Prediction K=4 heads (sharing embedding weights)
+        self.mtp_heads = nn.ModuleList([nn.Linear(config.d_byte, config.vocab_size, bias=False) for _ in range(3)])
+        for head in self.mtp_heads:
+            head.weight = self.embedding.weight
+
+    def _apply_td_highway(self, S_core_last, renderer_state_0, x_core=None):
         # [STEP-05] State is now (S, n) tuple — extract S matrix for highway projection
         S_core = S_core_last[0] if isinstance(S_core_last, tuple) else S_core_last
         ren_S  = renderer_state_0[0] if isinstance(renderer_state_0, tuple) else renderer_state_0
         ren_n  = renderer_state_0[1] if isinstance(renderer_state_0, tuple) else None
+        
+        if S_core is None:
+            return (ren_S, ren_n)
+            
         B = S_core.shape[0]
         S_mean = S_core.mean(dim=1)
         S_mean = self.highway_td_norm(S_mean.reshape(B, -1)).reshape(B, self._core_hw_shape[1], self._core_hw_shape[2])
         S_proj = self.highway_td_proj_k(S_mean.transpose(-1, -2)).transpose(-1, -2)
         S_proj = self.highway_td_proj_v(S_proj).unsqueeze(1).expand(-1, self._ren_hw_shape[0], -1, -1)
-        gate = torch.sigmoid(self.highway_td_gate)[None, :, None, None]
+        
+        if x_core is not None:
+            gate = torch.sigmoid(self.td_gate_net(x_core))[:, :, None, None]
+        else:
+            gate = torch.sigmoid(self.td_gate_net.bias)[None, :, None, None]
+            
         new_S = gate * S_proj if ren_S is None else ren_S + gate * S_proj
         return (new_S, ren_n)  # return (S, n) tuple to keep state format consistent
 
-    def _apply_bu_highway(self, S_renderer_last, core_state_0):
+    def _apply_bu_highway(self, S_renderer_last, core_state_0, x_dec_last=None):
         # [STEP-05] State is now (S, n) tuple — extract S matrix for highway projection
         S_ren  = S_renderer_last[0] if isinstance(S_renderer_last, tuple) else S_renderer_last
         core_S = core_state_0[0] if isinstance(core_state_0, tuple) else core_state_0
         core_n = core_state_0[1] if isinstance(core_state_0, tuple) else None
+        
+        if S_ren is None:
+            return (core_S, core_n)
+            
         B = S_ren.shape[0]
         S_mean = S_ren.mean(dim=1)
         S_mean = self.highway_bu_norm(S_mean.reshape(B, -1)).reshape(B, self._ren_hw_shape[1], self._ren_hw_shape[2])
         S_proj = self.highway_bu_proj_k(S_mean.transpose(-1, -2)).transpose(-1, -2)
         S_proj = self.highway_bu_proj_v(S_proj).unsqueeze(1).expand(-1, self._core_hw_shape[0], -1, -1)
-        gate = torch.sigmoid(self.highway_bu_gate)[None, :, None, None]
+        
+        if x_dec_last is not None:
+            gate = torch.sigmoid(self.bu_gate_net(x_dec_last))[:, :, None, None]
+        else:
+            gate = torch.sigmoid(self.bu_gate_net.bias)[None, :, None, None]
+            
         new_S = gate * S_proj if core_S is None else core_S + gate * S_proj
         return (new_S, core_n)  # return (S, n) tuple to keep state format consistent
 
-    def forward(self, byte_seq, states=None, offset=0):
+    def forward(self, byte_seq, states=None, offset=0, return_mtp=False):
         B, T = byte_seq.shape
         x_byte = self.embedding(byte_seq)
 
@@ -191,7 +222,7 @@ class OmegaGDM(nn.Module):
                 
                 core_init_0 = states[1][0]
                 if states[4] is not None and states[4].get('prev_renderer_last_S') is not None:
-                    core_init_0 = self._apply_bu_highway(states[4]['prev_renderer_last_S'], core_init_0)
+                    core_init_0 = self._apply_bu_highway(states[4]['prev_renderer_last_S'], core_init_0, states[4].get('x_dec_last'))
 
                 core_states_in = [core_init_0] + [states[1][i] for i in range(1, self.config.core_layers)]
                 x_semantic = x_semantic_in
@@ -207,7 +238,7 @@ class OmegaGDM(nn.Module):
                 S_core_last = raw_ns
                 z_broadcast = self.broadcaster(x_semantic, T)
                 z_broadcast_cache = self.broadcaster.proj(x_semantic[:, -1, :]).detach()
-                renderer_init_0 = self._apply_td_highway(S_core_last, states[2][0])
+                renderer_init_0 = self._apply_td_highway(S_core_last, states[2][0], x_semantic[:, -1, :])
             else:
                 z_broadcast = torch.zeros(B, T, self.config.d_byte, device=x_byte.device, dtype=x_byte.dtype)
                 if states[4] is not None:
@@ -230,10 +261,16 @@ class OmegaGDM(nn.Module):
                 'byte_pos': T % self.W,
                 'z_broadcast_cache': z_broadcast_cache,
                 'prev_renderer_last_S': raw_ren_ns,
+                'x_dec_last': x_dec[:, -1, :].detach()
             }
 
             x_out = self.norm_f(x_render)
-            return self.fc_out(x_out), next_states
+            logits1 = self.fc_out(x_out)
+            if return_mtp:
+                logits_all = [logits1] + [head(x_out) for head in self.mtp_heads]
+                return logits_all, next_states
+            else:
+                return logits1, next_states
 
         else:
             for i, layer in enumerate(self.byte_catcher):
@@ -283,7 +320,8 @@ class OmegaGDM(nn.Module):
             new_buf = {
                 'cum_prob': final_cum_prob,
                 'z_broadcast_cache': z_bc,
-                'prev_renderer_last_S': raw_ren_ns
+                'prev_renderer_last_S': raw_ren_ns,
+                'x_dec_last': x_dec_step.squeeze(1).detach()
             }
 
             if trigger_flag:
@@ -293,7 +331,7 @@ class OmegaGDM(nn.Module):
                 # [STEP-11] Absolute positional embedding removed (RoPE is applied inside the core's MultiHeadGatedDelta instead)
                 chunk_idx = offset // self.W 
 
-                core_init_0 = self._apply_bu_highway(raw_ren_ns, states[1][0])
+                core_init_0 = self._apply_bu_highway(raw_ren_ns, states[1][0], x_dec_step.squeeze(1))
                 core_states_in = [core_init_0] + [states[1][i] for i in range(1, self.config.core_layers)]
 
                 x_semantic = x_sem_chunk
@@ -308,13 +346,18 @@ class OmegaGDM(nn.Module):
 
                 S_core_last = raw_ns
                 new_buf['z_broadcast_cache'] = self.broadcaster.proj(x_semantic[:, 0, :]).detach()
-                next_states[2][0] = self._apply_td_highway(S_core_last, next_states[2][0])
+                next_states[2][0] = self._apply_td_highway(S_core_last, next_states[2][0], x_semantic[:, 0, :])
             else:
                 next_states[1] = list(states[1])
 
             next_states[4] = new_buf
             x_out = self.norm_f(x_render)
-            return self.fc_out(x_out), next_states
+            logits1 = self.fc_out(x_out)
+            if return_mtp:
+                logits_all = [logits1] + [head(x_out) for head in self.mtp_heads]
+                return logits_all, next_states
+            else:
+                return logits1, next_states
 
     @torch.no_grad()
     def generate(self, prompt_bytes, max_new_bytes=100, temp=0.8):
