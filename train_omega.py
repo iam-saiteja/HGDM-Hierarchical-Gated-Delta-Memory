@@ -131,6 +131,101 @@ class TopTransformer(nn.Module):
 # TRAINING SCRIPT
 # =============================================================================
 
+# [STEP-16] Self-Organizing Curriculum: loss-weighted sampling
+class SelfOrganizingCurriculum:
+    """Tracks per-document EMA loss and samples harder documents more often."""
+    def __init__(self, n_docs, alpha=0.1, temp=2.0):
+        self.n_docs = n_docs
+        self.alpha = alpha        # EMA smoothing factor
+        self.temp = temp          # temperature for softmax sampling
+        self.ema_losses = torch.ones(n_docs)  # start uniform
+        self._sampling_probs = None
+        self._dirty = True
+
+    def update(self, doc_idx, loss_val):
+        """Update EMA loss for a document."""
+        self.ema_losses[doc_idx] = (1 - self.alpha) * self.ema_losses[doc_idx] + self.alpha * loss_val
+        self._dirty = True
+
+    def _recompute_probs(self):
+        """Recompute sampling probabilities from EMA losses."""
+        logits = self.ema_losses * self.temp
+        self._sampling_probs = F.softmax(logits, dim=0)
+        self._dirty = False
+
+    @property
+    def probs(self):
+        if self._dirty:
+            self._recompute_probs()
+        return self._sampling_probs
+
+    def sample(self, k=1):
+        """Sample k document indices weighted by loss."""
+        if self._dirty:
+            self._recompute_probs()
+        return torch.multinomial(self._sampling_probs, k, replacement=True).tolist()
+
+    def kl_vs_uniform(self):
+        """KL divergence of current distribution vs uniform."""
+        p = self.probs
+        uniform = torch.ones_like(p) / self.n_docs
+        return (p * (p / uniform).log()).sum().item()
+
+
+# [STEP-17] Dream / Generative Replay: scheduled generative consolidation
+class DreamScheduler:
+    """Manages dreaming schedule: fires every `interval` steps after `warmup` steps."""
+    def __init__(self, warmup=2000, interval=500, dream_len=32, quality_threshold=2.0, lambda_dream=0.1):
+        self.warmup = warmup
+        self.interval = interval
+        self.dream_len = dream_len
+        self.quality_threshold = quality_threshold
+        self.lambda_dream = lambda_dream
+        self.recent_train_ppl = float('inf')  # EMA of recent training perplexity
+        self.ppl_alpha = 0.1
+
+    def update_train_ppl(self, loss):
+        """Update EMA of training perplexity from loss."""
+        ppl = math.exp(min(loss, 20.0))  # cap to avoid overflow
+        if self.recent_train_ppl == float('inf'):
+            self.recent_train_ppl = ppl
+        else:
+            self.recent_train_ppl = (1 - self.ppl_alpha) * self.recent_train_ppl + self.ppl_alpha * ppl
+
+    def should_dream(self, step):
+        """Check if dreaming should fire at this step."""
+        if step < self.warmup:
+            return False
+        return (step - self.warmup) % self.interval == 0
+
+    def dream(self, model, device, dtype):
+        """Generate a dream sequence and compute consistency loss.
+        Returns (dream_loss, dream_ppl, accepted) or (None, None, False) if rejected."""
+        model.eval()
+        with torch.no_grad():
+            seed = torch.randint(0, 256, (1, 1), device=device)
+            dream_seq = model.generate(seed, max_new_bytes=self.dream_len, temp=0.5)
+
+        # Compute perplexity of dreamed sequence
+        model.train()
+        x = dream_seq[:, :-1]
+        y = dream_seq[:, 1:]
+        if x.shape[1] == 0:
+            return None, None, False
+
+        logits, _ = model(x)
+        dream_loss = F.cross_entropy(logits.reshape(-1, 256), y.reshape(-1))
+        dream_ppl = math.exp(min(dream_loss.item(), 20.0))
+
+        # Quality gate: reject if dream PPL > threshold × recent train PPL
+        threshold = self.quality_threshold * self.recent_train_ppl
+        if dream_ppl > threshold:
+            return None, dream_ppl, False
+
+        # Scale dream loss
+        scaled_loss = dream_loss * self.lambda_dream
+        return scaled_loss, dream_ppl, True
+
 def get_gpu_memory():
     try:
         cmd = "nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits"
