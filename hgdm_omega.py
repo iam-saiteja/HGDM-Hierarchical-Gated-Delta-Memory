@@ -168,9 +168,15 @@ class OmegaGDM(nn.Module):
         new_S = gate * S_proj if core_S is None else core_S + gate * S_proj
         return (new_S, core_n)  # return (S, n) tuple to keep state format consistent
 
-    def forward(self, byte_seq, states=None, offset=0, return_mtp=False):
-        B, T = byte_seq.shape
-        x_byte = self.embedding(byte_seq)
+    def forward(self, byte_seq=None, states=None, offset=0, return_mtp=False, x_embed=None, return_latent=False):
+        if byte_seq is not None:
+            B, T = byte_seq.shape
+            x_byte = self.embedding(byte_seq)
+        elif x_embed is not None:
+            B, T, _ = x_embed.shape
+            x_byte = x_embed
+        else:
+            raise ValueError("Either byte_seq or x_embed must be provided")
 
         if states is None:
             states = [[None]*self.config.catcher_layers, [None]*self.config.core_layers, [None]*self.config.renderer_layers, None, None]
@@ -268,9 +274,14 @@ class OmegaGDM(nn.Module):
             logits1 = self.fc_out(x_out)
             if return_mtp:
                 logits_all = [logits1] + [head(x_out) for head in self.mtp_heads]
-                return logits_all, next_states
+                out_logits = logits_all
             else:
-                return logits1, next_states
+                out_logits = logits1
+                
+            if return_latent:
+                return out_logits, next_states, x_out
+            else:
+                return out_logits, next_states
 
         else:
             for i, layer in enumerate(self.byte_catcher):
@@ -283,13 +294,13 @@ class OmegaGDM(nn.Module):
             buf = states[4]
             if buf is None:
                 buf = {
-                    'cum_prob': torch.zeros(B, device=byte_seq.device), 
-                    'z_broadcast_cache': torch.zeros(B, self.config.d_byte, device=byte_seq.device, dtype=x_byte.dtype), 
+                    'cum_prob': torch.zeros(B, device=x_byte.device), 
+                    'z_broadcast_cache': torch.zeros(B, self.config.d_byte, device=x_byte.device, dtype=x_byte.dtype), 
                     'prev_renderer_last_S': None
                 }
             elif 'cum_prob' not in buf:
                 buf = {
-                    'cum_prob': torch.zeros(B, device=byte_seq.device),
+                    'cum_prob': torch.zeros(B, device=x_byte.device),
                     'z_broadcast_cache': buf['z_broadcast_cache'],
                     'prev_renderer_last_S': buf['prev_renderer_last_S']
                 }
@@ -355,12 +366,17 @@ class OmegaGDM(nn.Module):
             logits1 = self.fc_out(x_out)
             if return_mtp:
                 logits_all = [logits1] + [head(x_out) for head in self.mtp_heads]
-                return logits_all, next_states
+                out_logits = logits_all
             else:
-                return logits1, next_states
+                out_logits = logits1
+                
+            if return_latent:
+                return out_logits, next_states, x_out
+            else:
+                return out_logits, next_states
 
     @torch.no_grad()
-    def generate(self, prompt_bytes, max_new_bytes=100, temp=0.8):
+    def generate(self, prompt_bytes, max_new_bytes=100, temp=0.8, think_steps=0):
         self.eval()
         generated = prompt_bytes
         logits, states = self.forward(prompt_bytes)
@@ -370,9 +386,54 @@ class OmegaGDM(nn.Module):
 
         offset = prompt_bytes.shape[1]
         for _ in range(max_new_bytes - 1):
+            if think_steps > 0:
+                states, _ = latent_think(self, states, n_thoughts=think_steps, temp=temp, offset=offset)
+                offset += think_steps
             logits, states = self.forward(next_byte, states, offset=offset)
             next_logit = logits[:, -1, :] / temp
             next_byte = torch.multinomial(F.softmax(next_logit, dim=-1), num_samples=1)
             generated = torch.cat([generated, next_byte], dim=1)
             offset += 1
         return generated
+
+def latent_think(model, states, n_thoughts=8, temp=0.3, offset=0):
+    device = next(model.parameters()).device
+    dtype = next(model.parameters()).dtype
+    B = 1
+    
+    # Initialize thinking using embedding of a dummy zero byte
+    x_byte = model.embedding(torch.zeros(B, 1, dtype=torch.long, device=device))
+    
+    current_states = states
+    x_out_curr = x_byte
+    
+    thought_tokens = []
+    
+    for _ in range(n_thoughts):
+        logits, current_states, x_out_curr = model(
+            states=current_states, 
+            offset=offset, 
+            x_embed=x_out_curr, 
+            return_latent=True
+        )
+        logit = logits[:, -1, :] / temp
+        char_idx = torch.argmax(logit, dim=-1).item()
+        thought_tokens.append(char_idx)
+        offset += 1
+        
+    return current_states, thought_tokens
+
+def think_to_english(model, states, max_bytes=200):
+    # Runs latent_think to project latent thought tokens and decode them to ASCII
+    _, thought_tokens = latent_think(model, states, n_thoughts=max_bytes)
+    chars = []
+    for token in thought_tokens:
+        if 32 <= token <= 126:
+            chars.append(chr(token))
+        elif token == 10:
+            chars.append('\n')
+        elif token == 13:
+            chars.append('\r')
+        else:
+            chars.append('.')
+    return "".join(chars)

@@ -70,12 +70,12 @@ def load_model(device, checkpoint_path="hgdm_1b_latest.pt"):
     model.eval()
     return model
 
-def generate_text(model, prompt_text, device, max_new_bytes=200, temp=0.7):
+def generate_text(model, prompt_text, device, max_new_bytes=200, temp=0.7, think_steps=0):
     prompt_bytes = list(prompt_text.encode('utf-8', errors='ignore'))
     x = torch.tensor([prompt_bytes], dtype=torch.long, device=device)
 
     with torch.no_grad():
-        generated = model.generate(x, max_new_bytes=max_new_bytes, temp=temp)
+        generated = model.generate(x, max_new_bytes=max_new_bytes, temp=temp, think_steps=think_steps)
 
     new_bytes = generated[0, len(prompt_bytes):].tolist()
     decoded = bytes(new_bytes).decode('utf-8', errors='replace')
@@ -84,7 +84,7 @@ def generate_text(model, prompt_text, device, max_new_bytes=200, temp=0.7):
 # =============================================================================
 # TEST 1: GPU/CPU Generation Suite
 # =============================================================================
-def test_gpu_generation(model, device):
+def test_gpu_generation(model, device, think_steps=0):
     print(f"\n{'='*70}")
     print(f"  TEST 1: GENERATION (device={device})")
     print(f"{'='*70}")
@@ -97,7 +97,7 @@ def test_gpu_generation(model, device):
         if is_cuda:
             torch.cuda.synchronize()
         t0 = time.time()
-        output = generate_text(model, prompt, device, max_new_bytes=200, temp=0.7)
+        output = generate_text(model, prompt, device, max_new_bytes=200, temp=0.7, think_steps=think_steps)
         if is_cuda:
             torch.cuda.synchronize()
         elapsed = time.time() - t0
@@ -169,6 +169,7 @@ def main():
     parser = argparse.ArgumentParser(description="OmegaGDM 1B Inference Benchmarks")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu", help="Device (cuda or cpu)")
     parser.add_argument("--ckpt", default="hgdm_1b_latest.pt", help="Path to checkpoint .pt file")
+    parser.add_argument("--think_steps", type=int, default=0, help="Number of latent thinking steps before each byte generation")
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -177,7 +178,7 @@ def main():
     model = load_model(device, checkpoint_path=args.ckpt)
 
     # TEST 1: GPU/CPU generation with VRAM tracking
-    test_gpu_generation(model, device)
+    test_gpu_generation(model, device, think_steps=args.think_steps)
 
     # TEST 2: O(1) memory proof
     test_o1_memory_scaling(model, device)
