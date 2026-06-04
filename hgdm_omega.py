@@ -103,6 +103,12 @@ class OmegaGDM(nn.Module):
         self.fc_out  = nn.Linear(config.d_byte, config.vocab_size, bias=False)
         self.fc_out.weight = self.embedding.weight
 
+        # [STEP-12] Content-Aware Decimation: boundary head initialized with bias=-2.08 (p≈0.11≈1/8)
+        self.boundary_head = nn.Linear(config.d_byte, 1, bias=True)
+        with torch.no_grad():
+            self.boundary_head.weight.zero_()
+            self.boundary_head.bias.fill_(-2.08)
+
     def _apply_td_highway(self, S_core_last, renderer_state_0):
         # [STEP-05] State is now (S, n) tuple — extract S matrix for highway projection
         S_core = S_core_last[0] if isinstance(S_core_last, tuple) else S_core_last
@@ -150,7 +156,34 @@ class OmegaGDM(nn.Module):
             # BUG 1 FIX: Only slice completed windows, no F.pad poisoning
             N = T // self.W
             if N > 0:
-                x_semantic_in = x_dec[:, self.W - 1 : N * self.W : self.W, :]
+                # [STEP-12] Content-Aware Decimation
+                boundary_logit = self.boundary_head(x_byte) # [B, T, 1]
+                boundary_prob = torch.sigmoid(boundary_logit).squeeze(-1) # [B, T]
+                
+                cum_probs = torch.cumsum(boundary_prob, dim=-1)
+                floors = torch.floor(cum_probs)
+                crossings = torch.zeros_like(boundary_prob, dtype=torch.bool)
+                crossings[:, 1:] = floors[:, 1:] > floors[:, :-1]
+                crossings[:, 0] = floors[:, 0] >= 1.0
+                
+                selected_indices = []
+                for b in range(B):
+                    idx = torch.nonzero(crossings[b]).squeeze(-1)
+                    if idx.numel() > N:
+                        idx = idx[:N]
+                    elif idx.numel() < N:
+                        needed = N - idx.numel()
+                        prob_masked = boundary_prob[b].clone()
+                        prob_masked[idx] = -1.0
+                        _, top_idx = torch.topk(prob_masked, k=needed)
+                        idx = torch.cat([idx, top_idx])
+                    idx = torch.sort(idx)[0]
+                    selected_indices.append(idx)
+                selected_indices = torch.stack(selected_indices) # [B, N]
+                
+                boundary_prob_selected = torch.gather(boundary_prob, 1, selected_indices) # [B, N]
+                x_semantic_in = torch.gather(x_dec, 1, selected_indices.unsqueeze(-1).expand(-1, -1, x_dec.shape[-1]))
+                x_semantic_in = x_semantic_in * boundary_prob_selected.unsqueeze(-1)
                 x_semantic_in = self.decimator_proj(self.decimator_norm(x_semantic_in))
 
                 semantic_offset = offset // self.W
@@ -212,9 +245,19 @@ class OmegaGDM(nn.Module):
 
             buf = states[4]
             if buf is None:
-                buf = {'byte_pos': 0, 'z_broadcast_cache': torch.zeros(B, self.config.d_byte, device=byte_seq.device, dtype=x_byte.dtype), 'prev_renderer_last_S': None}
+                buf = {
+                    'cum_prob': torch.zeros(B, device=byte_seq.device), 
+                    'z_broadcast_cache': torch.zeros(B, self.config.d_byte, device=byte_seq.device, dtype=x_byte.dtype), 
+                    'prev_renderer_last_S': None
+                }
+            elif 'cum_prob' not in buf:
+                buf = {
+                    'cum_prob': torch.zeros(B, device=byte_seq.device),
+                    'z_broadcast_cache': buf['z_broadcast_cache'],
+                    'prev_renderer_last_S': buf['prev_renderer_last_S']
+                }
 
-            byte_pos = buf['byte_pos']
+            cum_prob = buf['cum_prob']
             z_bc = buf['z_broadcast_cache']
             x_render = x_byte + z_bc.unsqueeze(1)
 
@@ -225,11 +268,27 @@ class OmegaGDM(nn.Module):
                 raw_ren_ns = ns
                 next_states[2].append(ns)
 
-            next_byte_pos = byte_pos + 1
-            new_buf = {'byte_pos': next_byte_pos % self.W, 'z_broadcast_cache': z_bc, 'prev_renderer_last_S': raw_ren_ns}
+            # Compute boundary probability
+            boundary_logit = self.boundary_head(x_byte) # [B, 1, 1]
+            boundary_prob = torch.sigmoid(boundary_logit).squeeze(-1).squeeze(-1) # [B]
+            
+            new_cum_prob = cum_prob + boundary_prob
+            trigger_flag = (new_cum_prob[0] >= 1.0).item()
+            
+            if trigger_flag:
+                final_cum_prob = new_cum_prob - 1.0
+            else:
+                final_cum_prob = new_cum_prob
 
-            if next_byte_pos == self.W:
+            new_buf = {
+                'cum_prob': final_cum_prob,
+                'z_broadcast_cache': z_bc,
+                'prev_renderer_last_S': raw_ren_ns
+            }
+
+            if trigger_flag:
                 x_sem_chunk = self.decimator_proj(self.decimator_norm(x_dec_step))
+                x_sem_chunk = x_sem_chunk * boundary_prob.unsqueeze(1).unsqueeze(2)
                 
                 # [STEP-11] Absolute positional embedding removed (RoPE is applied inside the core's MultiHeadGatedDelta instead)
                 chunk_idx = offset // self.W 

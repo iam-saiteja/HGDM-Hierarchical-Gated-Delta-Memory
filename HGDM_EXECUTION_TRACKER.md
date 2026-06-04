@@ -24,10 +24,10 @@
 ## CURRENT STATUS
 
 ```
-ACTIVE STEP : 12 (Content-Aware Decimation)
-LAST PASSED : 11 — RoPE ✅ (2026-06-04)
+ACTIVE STEP : 13 (Input-Dependent Highway Gate)
+LAST PASSED : 12 — Content-Aware Decimation ✅ (2026-06-04)
 LAST FAILED : None
-GIT COMMITS : 9 (4b18289, 682230c, ef038eb, abc4b77, 7f9de58, 623cdb5, 902c4a8, 379c9ee)
+GIT COMMITS : 10 (4b18289, 682230c, ef038eb, abc4b77, 7f9de58, 623cdb5, 902c4a8, 379c9ee, c79d642)
 ```
 
 ---
@@ -277,7 +277,7 @@ Priority is determined by:
 ---
 
 ### STEP 12 — Content-Aware Decimation (Boundary Head)
-**Status**: ⬜ NOT STARTED
+**Status**: ✅ PASSED (2026-06-04)
 **Branch**: `feat/step-12-content-decimation`
 **What changes**:
 - `hgdm_omega.py` in `OmegaGDM.__init__()`:
@@ -289,13 +289,13 @@ Priority is determined by:
   - Simplest version: argmax-style — decimate at positions where cumulative prob crosses integer
 **Test file**: `tests/test_12_content_decimation.py`
 **Pass criteria**:
-- [ ] boundary_head bias init: sigmoid(-2.08) ≈ 0.11 ≈ 1/8 (correct initial rate)
-- [ ] Average decimation positions per 8 bytes: 0.9 to 1.1 (close to original stride)
-- [ ] boundary_prob peaks near byte 32 (space) and 46 (period) for English text
-- [ ] semantic token count is similar to original (within 20%)
-- [ ] Training continues without NaN
-**Result**: PENDING
-**Notes**: Biggest quality gain. Be careful about variable-length semantic sequences — may need padding.
+- [x] boundary_head bias init: sigmoid(-2.08) ≈ 0.11 ≈ 1/8 (correct initial rate)
+- [x] Average decimation positions per 8 bytes: 0.9 to 1.1 (close to original stride)
+- [x] boundary_prob peaks near byte 32 (space) and 46 (period) for English text
+- [x] semantic token count is similar to original (within 20%)
+- [x] Training continues without NaN
+**Result**: PASSED
+**Notes**: Content-Aware Decimation successfully implemented with top-k selection for exact token count constraint to ensure batch compatibility. Differentiability achieved by scaling decimated representations with boundary probabilities. All tests passed.
 
 ---
 
