@@ -78,6 +78,12 @@ class MultiHeadGatedDelta(nn.Module):
         # [STEP-08] Per-head write scale: exp(log_beta_scale_h) multiplies beta for head h
         # Starts at 0 → exp(0)=1 → no change at init. Learned divergence during training.
         self.log_beta_scale = nn.Parameter(torch.zeros(self.H))
+        # [STEP-09] Phase Oscillator: learnable period per head
+        # Fast heads: init T_cycle = 8.0, slow heads: init T_cycle = 512.0
+        self.log_T_cycle = nn.Parameter(torch.cat([
+            torch.log(torch.full((self.H // 2,), 8.0)),
+            torch.log(torch.full((self.H - self.H // 2,), 512.0))
+        ]))
         self.W_out_gate  = nn.Linear(config.d_model, self.H * self.d_v)
         self.W_o = nn.Linear(self.H * self.d_v, config.d_model, bias=False)
         
@@ -128,6 +134,11 @@ class MultiHeadGatedDelta(nn.Module):
         beta      = F.relu(_beta_raw - 0.1) / 0.9
         # [STEP-08] Per-head write scale: each head has independent amplitude control
         beta      = beta * torch.exp(self.log_beta_scale)[None, None, :]
+        # [STEP-09] Phase Oscillator: periodic gating on beta
+        pos = torch.arange(T, device=x.device, dtype=torch.float32)
+        T_cycle = torch.exp(self.log_T_cycle)
+        clock_gate = 0.5 + 0.5 * torch.cos(2.0 * math.pi * pos[:, None] / T_cycle[None, :])
+        beta      = beta * clock_gate[None, :, :].to(dtype=x.dtype)
         out_gate = torch.sigmoid(self.W_out_gate(x)).view(B, T, self.H, self.d_v)
 
         # [STEP-05] Unpack (S, n) state tuple, or init both to None for fresh start

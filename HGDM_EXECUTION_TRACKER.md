@@ -24,10 +24,10 @@
 ## CURRENT STATUS
 
 ```
-ACTIVE STEP : 09 (Phase Oscillator on β)
-LAST PASSED : 08 — Per-Head Write Scale ✅ (2026-06-04)
+ACTIVE STEP : 10 (Boundary Clock)
+LAST PASSED : 09 — Phase Oscillator on β ✅ (2026-06-04)
 LAST FAILED : None
-GIT COMMITS : 6 (4b18289, 682230c, ef038eb, abc4b77, 7f9de58)
+GIT COMMITS : 7 (4b18289, 682230c, ef038eb, abc4b77, 7f9de58, 623cdb5)
 ```
 
 ---
@@ -211,7 +211,7 @@ Priority is determined by:
 ---
 
 ### STEP 09 — Phase Oscillator on β (CORRECTED — gates WRITE not DECAY)
-**Status**: ⬜ NOT STARTED
+**Status**: ✅ PASSED (2026-06-04)
 **Branch**: `feat/step-09-phase-oscillator`
 **What changes**:
 - `hgdm_ultimate.py` `MultiHeadGatedDelta.__init__()`:
@@ -223,14 +223,14 @@ Priority is determined by:
   - Apply to BETA: `beta = beta * clock_gate.unsqueeze(0)` — NOT alpha
 **Test file**: `tests/test_09_phase_oscillator.py`
 **Pass criteria**:
-- [ ] clock_gate values in [0, 1] at all positions
-- [ ] Alpha is NOT modified by clock_gate (verify alpha values unchanged)
-- [ ] Beta oscillates: std of beta over time > 0.1
-- [ ] At trough positions: beta ≈ 0, state = alpha * S (no new write)
-- [ ] At peak positions: beta at full scale
-- [ ] Gradient through log_T_cycle is nonzero
-**Result**: PENDING
-**Notes**: CRITICAL — test that alpha is unaffected. The old wrong version gated alpha.
+- [x] clock_gate values in [0, 1] at all positions
+- [x] Alpha is NOT modified by clock_gate (verify alpha values unchanged)
+- [x] Beta oscillates: std of beta over time > 0.1
+- [x] At trough positions: beta ≈ 0, state = alpha * S (no new write)
+- [x] At peak positions: beta at full scale
+- [x] Gradient through log_T_cycle is nonzero
+**Result**: PASSED
+**Notes**: Gating beta instead of alpha prevents spurious memory resets. All tests passed.
 
 ---
 
