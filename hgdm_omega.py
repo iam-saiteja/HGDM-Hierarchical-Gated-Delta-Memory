@@ -59,9 +59,19 @@ class OmegaGDM(nn.Module):
         self.decimator_proj = nn.Linear(config.d_byte, config.d_model, bias=False)
         self.decimator_norm = RMSNorm(config.d_byte)
 
-        self.semantic_pos_embed = nn.Parameter(torch.randn(1, config.max_position_embeddings // self.W, config.d_model) * 0.02)
+        # [STEP-11] Absolute positional embedding removed (saves VRAM, using RoPE in core mixer instead)
+        # self.semantic_pos_embed removed
 
-        core_cfg = HGDMConfig(d_model=config.d_model, n_layers=config.core_layers, n_heads=config.n_heads, d_k=config.d_k, d_v=config.d_v, d_ff=config.d_ff)
+        core_cfg = HGDMConfig(
+            d_model=config.d_model, 
+            n_layers=config.core_layers, 
+            n_heads=config.n_heads, 
+            d_k=config.d_k, 
+            d_v=config.d_v, 
+            d_ff=config.d_ff,
+            use_rope=True,
+            max_position_embeddings=config.max_position_embeddings // self.W
+        )
         self.semantic_core = nn.ModuleList([HGDMLayer(core_cfg, i, force_sequential) for i in range(config.core_layers)])
 
         if config.use_state_fusion:
@@ -144,13 +154,8 @@ class OmegaGDM(nn.Module):
                 x_semantic_in = self.decimator_proj(self.decimator_norm(x_semantic_in))
 
                 semantic_offset = offset // self.W
-                pos_idx = semantic_offset % self.semantic_pos_embed.shape[1]
-                if pos_idx + N > self.semantic_pos_embed.shape[1]:
-                    indices = (torch.arange(semantic_offset, semantic_offset + N, device=byte_seq.device) % self.semantic_pos_embed.shape[1])
-                    x_semantic_in = x_semantic_in + self.semantic_pos_embed[:, indices, :]
-                else:
-                    x_semantic_in = x_semantic_in + self.semantic_pos_embed[:, pos_idx : pos_idx + N, :]
-
+                # [STEP-11] Absolute positional embedding removed (RoPE is applied inside the core's MultiHeadGatedDelta instead)
+                
                 core_init_0 = states[1][0]
                 if states[4] is not None and states[4].get('prev_renderer_last_S') is not None:
                     core_init_0 = self._apply_bu_highway(states[4]['prev_renderer_last_S'], core_init_0)
@@ -159,7 +164,7 @@ class OmegaGDM(nn.Module):
                 x_semantic = x_semantic_in
                 prev_raw_ns = None
                 for i, layer in enumerate(self.semantic_core):
-                    x_semantic, ns = layer(x_semantic, core_states_in[i])
+                    x_semantic, ns = layer(x_semantic, core_states_in[i], offset=semantic_offset)
                     raw_ns = ns
                     if self.config.use_state_fusion and i > 0 and prev_raw_ns is not None:
                         ns = self.core_state_fusion.fuse(ns, prev_raw_ns, i)
@@ -226,10 +231,8 @@ class OmegaGDM(nn.Module):
             if next_byte_pos == self.W:
                 x_sem_chunk = self.decimator_proj(self.decimator_norm(x_dec_step))
                 
-                # BUG 2 FIX: True zero-indexed chunk position
+                # [STEP-11] Absolute positional embedding removed (RoPE is applied inside the core's MultiHeadGatedDelta instead)
                 chunk_idx = offset // self.W 
-                pos_i = chunk_idx % self.semantic_pos_embed.shape[1]
-                x_sem_chunk = x_sem_chunk + self.semantic_pos_embed[:, pos_i : pos_i + 1, :]
 
                 core_init_0 = self._apply_bu_highway(raw_ren_ns, states[1][0])
                 core_states_in = [core_init_0] + [states[1][i] for i in range(1, self.config.core_layers)]
@@ -237,7 +240,7 @@ class OmegaGDM(nn.Module):
                 x_semantic = x_sem_chunk
                 prev_raw_ns = None
                 for i, layer in enumerate(self.semantic_core):
-                    x_semantic, ns = layer(x_semantic, core_states_in[i])
+                    x_semantic, ns = layer(x_semantic, core_states_in[i], offset=chunk_idx)
                     raw_ns = ns
                     if self.config.use_state_fusion and i > 0 and prev_raw_ns is not None:
                         ns = self.core_state_fusion.fuse(ns, prev_raw_ns, i)

@@ -24,10 +24,10 @@
 ## CURRENT STATUS
 
 ```
-ACTIVE STEP : 11 (RoPE)
-LAST PASSED : 10 — Boundary Clock ✅ (2026-06-04)
+ACTIVE STEP : 12 (Content-Aware Decimation)
+LAST PASSED : 11 — RoPE ✅ (2026-06-04)
 LAST FAILED : None
-GIT COMMITS : 8 (4b18289, 682230c, ef038eb, abc4b77, 7f9de58, 623cdb5, 902c4a8)
+GIT COMMITS : 9 (4b18289, 682230c, ef038eb, abc4b77, 7f9de58, 623cdb5, 902c4a8, 379c9ee)
 ```
 
 ---
@@ -254,7 +254,7 @@ Priority is determined by:
 ---
 
 ### STEP 11 — RoPE (Replace semantic_pos_embed)
-**Status**: ⬜ NOT STARTED
+**Status**: ✅ PASSED (2026-06-04)
 **Branch**: `feat/step-11-rope`
 **What changes**:
 - `hgdm_omega.py`:
@@ -267,12 +267,12 @@ Priority is determined by:
   - Add RoPE application in `MultiHeadGatedDelta.forward()` when enabled
 **Test file**: `tests/test_11_rope.py`
 **Pass criteria**:
-- [ ] `<f(q,t), f(k,s)>` depends only on (t-s), not t or s individually (verify 3 cases)
-- [ ] VRAM used: at least 3MB less than before (semantic_pos_embed removed)
-- [ ] Generation at length > max_position_embeddings does not crash
-- [ ] Training loss equivalent to pos_embed version (within 5%)
-**Result**: PENDING
-**Notes**: Remove `semantic_pos_embed` in `hgdm_omega.py` (line 62). Save ~3-256MB depending on config.
+- [x] `<f(q,t), f(k,s)>` depends only on (t-s), not t or s individually (verify 3 cases)
+- [x] VRAM used: at least 3MB less than before (semantic_pos_embed removed)
+- [x] Generation at length > max_position_embeddings does not crash
+- [x] Training loss equivalent to pos_embed version (within 5%)
+**Result**: PASSED
+**Notes**: Rotary Position Embeddings (RoPE) successfully implemented inside MultiHeadGatedDelta and integrated with OmegaGDM. Absolute positional embedding successfully removed from hgdm_omega.py. All tests passed.
 
 ---
 

@@ -21,6 +21,7 @@ class HGDMConfig:
     use_variable_delta_t: bool = True   # [STEP-01] Time-based model: content-driven Δt decay (CfC/Mamba)
     use_state_fusion: bool = False      # Feature 6: Cross-Layer State Fusion (State Highways)
     max_position_embeddings: int = 2048 # Bug 2 Fix: Configurable positional embedding size (saves 201MB VRAM by default)
+    use_rope: bool = False              # [STEP-11] Rotary Position Embeddings (RoPE)
 
 # =============================================================================
 # 2. THE COMPONENTS
@@ -43,6 +44,35 @@ class SwiGLU(nn.Module):
     def forward(self, x):
         return self.drop(self.w3(F.silu(self.w1(x)) * self.w2(x)))
 
+class RoPEEmbedding(nn.Module):
+    def __init__(self, dim, max_position_embeddings=2048, base=10000):
+        super().__init__()
+        self.dim = dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2).float() / self.dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        
+        t = torch.arange(self.max_position_embeddings, dtype=torch.float32)
+        freqs = torch.outer(t, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer("cos_cached", emb.cos(), persistent=False)
+        self.register_buffer("sin_cached", emb.sin(), persistent=False)
+
+    def forward(self, x, seq_len, offset=0):
+        total_len = offset + seq_len
+        if total_len > self.cos_cached.shape[0]:
+            t = torch.arange(offset, total_len, device=x.device, dtype=torch.float32)
+            freqs = torch.outer(t, self.inv_freq.to(x.device))
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos()
+            sin = emb.sin()
+        else:
+            cos = self.cos_cached[offset:total_len].to(x.device)
+            sin = self.sin_cached[offset:total_len].to(x.device)
+            
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+
 class MultiHeadGatedDelta(nn.Module):
     def __init__(self, config: HGDMConfig, force_sequential=False):
         super().__init__()
@@ -55,6 +85,11 @@ class MultiHeadGatedDelta(nn.Module):
         self.W_q = nn.Linear(config.d_model, self.H * self.d_k, bias=False)
         self.W_k = nn.Linear(config.d_model, self.H * self.d_k, bias=False)
         self.W_v = nn.Linear(config.d_model, self.H * self.d_v, bias=False)
+        
+        # [STEP-11] Rotary Position Embeddings (RoPE)
+        self.use_rope = getattr(config, "use_rope", False)
+        if self.use_rope:
+            self.rope_emb = RoPEEmbedding(self.d_k, max_position_embeddings=getattr(config, "max_position_embeddings", 2048))
         
         # [STEP-04] Asymmetric Decay Init: cortical half/half split
         # Fast heads (h < H//2): τ = 4*(h+1)  → short timescales [4, 8, 12, ...]
@@ -114,11 +149,21 @@ class MultiHeadGatedDelta(nn.Module):
             self.W_out_gate.weight.zero_()
             self.W_out_gate.bias.zero_()
 
-    def forward(self, x, state=None, boundary_mask=None):
+    def forward(self, x, state=None, boundary_mask=None, offset=0):
         B, T, _ = x.shape
         # [STEP-02] QK-Norm: L2-normalize q and k to unit sphere before state update.
         q = F.normalize(self.W_q(x).view(B, T, self.H, self.d_k), dim=-1)
         k = F.normalize(self.W_k(x).view(B, T, self.H, self.d_k), dim=-1)
+        
+        # [STEP-11] Rotary Position Embeddings (RoPE)
+        if getattr(self.config, "use_rope", False):
+            cos, sin = self.rope_emb(q, T, offset=offset)
+            d = q.shape[-1]
+            def rotate_half(tensor):
+                return torch.cat((-tensor[..., d//2:], tensor[..., :d//2]), dim=-1)
+            q = q * cos[None, :, None, :] + rotate_half(q) * sin[None, :, None, :]
+            k = k * cos[None, :, None, :] + rotate_half(k) * sin[None, :, None, :]
+            
         v = self.W_v(x).view(B, T, self.H, self.d_v)
         
         # Variable-Delta-t ODE Decay
@@ -205,8 +250,8 @@ class HGDMLayer(nn.Module):
         self.norm2 = RMSNorm(config.d_model)
         self.ffn = SwiGLU(config.d_model, config.d_ff)
         
-    def forward(self, x, state=None, boundary_mask=None):
-        m_out, new_mixer_state = self.mixer(self.norm1(x), state=state, boundary_mask=boundary_mask)
+    def forward(self, x, state=None, boundary_mask=None, offset=0):
+        m_out, new_mixer_state = self.mixer(self.norm1(x), state=state, boundary_mask=boundary_mask, offset=offset)
         x = x + m_out
         x = x + self.ffn(self.norm2(x))
         return x, new_mixer_state
@@ -268,7 +313,7 @@ class HGDMUltimate(nn.Module):
         prev_state = None
         
         for i, layer in enumerate(self.layers):
-            x, ns = layer(x, states[i], boundary_mask=boundary_mask)
+            x, ns = layer(x, states[i], boundary_mask=boundary_mask, offset=offset)
             # Bug 3 Fix: Track raw unfused recurrent state to prevent cascade explosion
             unfused_ns = ns
             
