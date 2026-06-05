@@ -271,7 +271,9 @@ def build_omega_model(ckpt_path: Optional[str], device: torch.device) -> OmegaGD
                 cfg.renderer_layers = max(renderer_indices) + 1
 
             first_core_prefix = "semantic_core.0"
-            if f"{first_core_prefix}.mixer.W_alpha.weight" in sd:
+            if f"{first_core_prefix}.mixer.log_beta_scale" in sd:
+                cfg.n_heads = sd[f"{first_core_prefix}.mixer.log_beta_scale"].shape[0]
+            elif f"{first_core_prefix}.mixer.W_alpha.weight" in sd:
                 cfg.n_heads = sd[f"{first_core_prefix}.mixer.W_alpha.weight"].shape[0]
             if f"{first_core_prefix}.mixer.W_q.weight" in sd:
                 cfg.d_k = sd[f"{first_core_prefix}.mixer.W_q.weight"].shape[0] // cfg.n_heads

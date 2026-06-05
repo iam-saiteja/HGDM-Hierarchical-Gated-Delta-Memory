@@ -368,6 +368,7 @@ def main():
     parser.add_argument("--no-precheck", action="store_true", help="Skip dataset streaming pre-verification")
     parser.add_argument("--only-omega", action="store_true", help="Train only the OmegaGDM architecture, skipping Transformer baseline")
     parser.add_argument("--steps", type=int, default=500, help="Number of training steps")
+    parser.add_argument("--quick", action="store_true", help="Train a fast, small model under 10 minutes to verify internals and print interpretability data")
     args = parser.parse_args()
 
     device = torch.device('cuda')
@@ -378,10 +379,18 @@ def main():
     else:
         print("[Dataset] Skipping dataset pre-verification check as requested.")
 
-    max_steps = args.steps
-    grad_accum = 4
-    batch_size = 8
-    block_size = 2048
+    if args.quick:
+        print("[Quick Mode] Activating ultra-fast training configuration (under 2 minutes)...")
+        max_steps = 150
+        args.only_omega = True
+        grad_accum = 2
+        batch_size = 4
+        block_size = 512
+    else:
+        max_steps = args.steps
+        grad_accum = 4
+        batch_size = 8
+        block_size = 2048
 
     # Model 1: LLaMA-3 Style Standard Transformer
     if not args.only_omega:
@@ -403,26 +412,48 @@ def main():
         logs_trans, params_trans = None, None
 
     # Model 2: OmegaGDM V2.1
-    omega_cfg = OmegaConfig(
-        d_byte=256,
-        catcher_layers=2,
-        renderer_layers=2,
-        d_model=1024,
-        core_layers=12,
-        n_heads=16,
-        d_k=64,
-        d_v=64,
-        d_ff=4096,
-        decimation_rate=8,
-        max_position_embeddings=2048,
-        vocab_size=256,
-        use_state_fusion=False
-    )
+    if args.quick:
+        omega_cfg = OmegaConfig(
+            d_byte=256,
+            catcher_layers=1,
+            renderer_layers=1,
+            d_model=256,
+            core_layers=4,
+            n_heads=4,
+            d_k=32,
+            d_v=32,
+            d_ff=512,
+            decimation_rate=8,
+            max_position_embeddings=2048,
+            vocab_size=256,
+            use_state_fusion=False
+        )
+    else:
+        omega_cfg = OmegaConfig(
+            d_byte=256,
+            catcher_layers=2,
+            renderer_layers=2,
+            d_model=1024,
+            core_layers=12,
+            n_heads=16,
+            d_k=64,
+            d_v=64,
+            d_ff=4096,
+            decimation_rate=8,
+            max_position_embeddings=2048,
+            vocab_size=256,
+            use_state_fusion=False
+        )
     omega_model = OmegaGDM(omega_cfg, force_sequential=False).to(device)
     
     logs_omega, params_omega = train_model(
         omega_model, "OmegaGDM (New)", max_steps, block_size, batch_size, grad_accum, device
     )
+
+    # Save checkpoint
+    ckpt_path = "omega_checkpoint.pt"
+    torch.save(omega_model.state_dict(), ckpt_path)
+    print(f"\n[Training] Saved trained model checkpoint to: {ckpt_path}")
 
     # FINAL COMPARISON
     if not args.only_omega and logs_trans is not None:
@@ -465,6 +496,14 @@ def main():
         print(f"Peak Net VRAM: {vram_o} MB")
         print(f"Avg Step Time: {time_o:.3f} s")
         print(f"{'='*100}")
+
+    if args.quick:
+        # Run interpret_omega.py to verify internals and print interpretability data
+        print("\n" + "="*60)
+        print("RUNNING INTERPRETABILITY PROBE")
+        print("="*60)
+        cmd = [sys.executable, "interpret_omega.py", "--model", "omega", "--ckpt", ckpt_path, "--out", "probe_data.json"]
+        subprocess.run(cmd)
 
 if __name__ == "__main__":
     main()
