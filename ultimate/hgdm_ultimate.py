@@ -5,9 +5,10 @@ import math
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
 try:
-    from kernel_nitro import fused_nitro_scan
+    from kernel_nitro import fused_nitro_scan, fused_vector_scan
 except (ImportError, Exception):
     fused_nitro_scan = None
+    fused_vector_scan = None
 
 # =============================================================================
 # 1. THE CONFIGURATION (120M Baseline)
@@ -25,6 +26,8 @@ class HGDMConfig:
     use_state_fusion: bool = False      # Feature 6: Cross-Layer State Fusion (State Highways)
     max_position_embeddings: int = 2048 # Bug 2 Fix: Configurable positional embedding size (saves 201MB VRAM by default)
     use_rope: bool = False              # [STEP-11] Rotary Position Embeddings (RoPE)
+    boundary_token_ids: Tuple[int, ...] = (46, 63, 33, 10)
+    n_grad_mode: str = "detached"       # "detached" saves VRAM; "exact" backprops through n.
 
 # =============================================================================
 # 2. THE COMPONENTS
@@ -155,8 +158,8 @@ class MultiHeadGatedDelta(nn.Module):
     def forward(self, x, state=None, boundary_mask=None, offset=0):
         B, T, _ = x.shape
         # [STEP-02] QK-Norm: L2-normalize q and k to unit sphere before state update.
-        q = F.normalize(self.W_q(x).view(B, T, self.H, self.d_k), dim=-1)
-        k = F.normalize(self.W_k(x).view(B, T, self.H, self.d_k), dim=-1)
+        q = F.normalize(self.W_q(x).view(B, T, self.H, self.d_k), dim=-1, eps=1e-6)
+        k = F.normalize(self.W_k(x).view(B, T, self.H, self.d_k), dim=-1, eps=1e-6)
         
         # [STEP-11] Rotary Position Embeddings (RoPE)
         if getattr(self.config, "use_rope", False):
@@ -176,6 +179,7 @@ class MultiHeadGatedDelta(nn.Module):
             alpha = torch.exp(-delta_t * lambdas[None, None, :])
         else:
             alpha = torch.sigmoid(self.W_alpha(x))
+        alpha = alpha.clamp(min=1e-6, max=1.0)
             
         # [STEP-10] Boundary Clock: selectively reset fast heads (h < H//2) at boundaries
         if boundary_mask is not None:
@@ -204,23 +208,31 @@ class MultiHeadGatedDelta(nn.Module):
 
         if not self.force_sequential and fused_nitro_scan is not None and q.is_cuda:
             # FAST PATH: Triton kernel handles the expensive S recurrence
-            try:
-                from kernel_nitro import fused_nitro_scan_with_n
-                out, S, n_stack = fused_nitro_scan_with_n(q, k, v, alpha, beta, state=S_prev, initial_n=n_prev, chunk_size=32)
-                n_stack = n_stack.transpose(1, 2)  # [B, H, T, dk] -> [B, T, H, dk]
-                n = n_stack[:, -1, :, :]
-            except ImportError:
+            n_grad_mode = getattr(self.config, "n_grad_mode", "detached")
+            if n_grad_mode not in ("detached", "exact"):
+                raise ValueError(f"Unsupported n_grad_mode={n_grad_mode!r}; expected 'detached' or 'exact'")
+
+            needs_grad = torch.is_grad_enabled() and (
+                q.requires_grad or k.requires_grad or v.requires_grad or alpha.requires_grad or beta.requires_grad
+            )
+            if needs_grad and n_grad_mode == "exact":
                 out, S = fused_nitro_scan(q, k, v, alpha, beta, S_prev)
-                try:
-                    from kernel_nitro import fused_vector_scan
+                if fused_vector_scan is not None:
                     n_stack, n = fused_vector_scan(alpha, beta, k, initial_n=n_prev, chunk_size=32)
-                except ImportError:
+                else:
                     n = n_prev if n_prev is not None else torch.zeros(B, self.H, self.d_k, device=x.device, dtype=x.dtype)
                     n_list = []
                     for t in range(T):
                         n = alpha[:, t, :, None] * n + beta[:, t, :, None] * k[:, t]
                         n_list.append(n)
                     n_stack = torch.stack(n_list, dim=1)  # [B, T, H, d_k]
+            else:
+                from kernel_nitro import fused_nitro_scan_with_n
+                out, S, n_stack = fused_nitro_scan_with_n(q, k, v, alpha, beta, state=S_prev, initial_n=n_prev, chunk_size=32)
+                n_stack = n_stack.transpose(1, 2)  # [B, H, T, dk] -> [B, T, H, dk]
+                if needs_grad:
+                    n_stack = n_stack.detach()
+                n = n_stack[:, -1, :, :]
 
             # [STEP-05] Normalize: out = (q @ S) / max(||n||_inf, 1)
             n_inf  = n_stack.abs().max(dim=-1)[0]                # [B, T, H]
@@ -317,9 +329,10 @@ class HGDMUltimate(nn.Module):
         B, T = byte_seq.shape
         x = self.embedding(byte_seq)
         
-        # [STEP-10] Boundary Clock: detect sentence/line boundaries
-        # '.', '?', '!', '\n' correspond to byte values 46, 63, 33, 10
-        boundary_mask = (byte_seq == 46) | (byte_seq == 63) | (byte_seq == 33) | (byte_seq == 10)
+        # [STEP-10] Boundary Clock: configurable reset tokens.
+        boundary_mask = torch.zeros_like(byte_seq, dtype=torch.bool)
+        for token_id in getattr(self.config, "boundary_token_ids", (46, 63, 33, 10)):
+            boundary_mask = boundary_mask | (byte_seq == token_id)
         
         # Bug 2 Wrap-around check: Allow arbitrary token offsets during generation without out-of-bounds errors
         if self.pos_embedding is not None:

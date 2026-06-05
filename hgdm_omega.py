@@ -7,15 +7,19 @@ from dataclasses import dataclass
 try:
     from ultimate.hgdm_ultimate import HGDMLayer, RMSNorm, HGDMConfig, CrossLayerStateFusion
 except (ImportError, ModuleNotFoundError):
-    # Fallback: Try relative import
     try:
-        from .ultimate.hgdm_ultimate import HGDMLayer, RMSNorm, HGDMConfig, CrossLayerStateFusion
+        from hgdm_ultimate import HGDMLayer, RMSNorm, HGDMConfig, CrossLayerStateFusion
     except (ImportError, ModuleNotFoundError, ValueError):
-        # If both fail, raise with helpful message
-        raise ImportError(
-            "Could not import HGDMLayer from ultimate.hgdm_ultimate. "
-            "Ensure ultimate/ is in your Python path or run from project root."
-        )
+        try:
+            from .ultimate.hgdm_ultimate import HGDMLayer, RMSNorm, HGDMConfig, CrossLayerStateFusion
+        except (ImportError, ModuleNotFoundError, ValueError):
+            try:
+                from .hgdm_ultimate import HGDMLayer, RMSNorm, HGDMConfig, CrossLayerStateFusion
+            except (ImportError, ModuleNotFoundError, ValueError) as exc:
+                raise ImportError(
+                    "Could not import HGDMLayer from ultimate.hgdm_ultimate or hgdm_ultimate. "
+                    "Ensure ultimate/ is in your Python path or run from project root."
+                ) from exc
 
 # =============================================================================
 # OMEGAGDM V2 — Hierarchical Temporal Decimation (Bugfixed)

@@ -607,6 +607,7 @@ class FusedNitroScanWithN(torch.autograd.Function):
     """
     @staticmethod
     def forward(ctx, q, k, v, alpha, beta, state=None, initial_n=None, chunk_size=_DEFAULT_CHUNK_SIZE):
+        ctx.set_materialize_grads(False)
         B, T, H, dk = q.shape
         dv = v.shape[-1]
         
@@ -674,8 +675,14 @@ class FusedNitroScanWithN(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, dstate, dn_out):
-        # For now, only backprop through dout (same as original kernel)
-        # Full backprop through n would require modified backward kernel
+        if dn_out is not None:
+            raise RuntimeError(
+                "FusedNitroScanWithN does not implement gradients through n_stack. "
+                "Use fused_nitro_scan plus fused_vector_scan for training, or call "
+                "fused_nitro_scan_with_n only under torch.no_grad()."
+            )
+
+        # Backprop through dout and final S only.
         q_s, k_s, v_s, a_s, b_s, is_s = ctx.saved_tensors
         B, H, T = q_s.shape[:3]
         dk = q_s.shape[3]
