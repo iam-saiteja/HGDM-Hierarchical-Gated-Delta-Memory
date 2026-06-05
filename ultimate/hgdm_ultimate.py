@@ -5,10 +5,9 @@ import math
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
 try:
-    from kernel_nitro import fused_nitro_scan, fused_vector_scan, fused_nitro_scan_with_n
+    from kernel_nitro import fused_nitro_scan, fused_nitro_scan_with_n
 except (ImportError, Exception):
     fused_nitro_scan = None
-    fused_vector_scan = None
     fused_nitro_scan_with_n = None
 
 # =============================================================================
