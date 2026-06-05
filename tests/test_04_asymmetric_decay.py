@@ -114,13 +114,15 @@ test("Alpha span: fast heads < 0.90, slow heads > 0.99", t4)
 # ── TEST 5: No NaN over 500 steps ──────────────────────────────────────────────
 def t5():
     mixer = MultiHeadGatedDelta(config, force_sequential=True).to(DEVICE)
-    S = None
+    state = None
     for chunk in range(25):
         x = torch.randn(1, 20, D, device=DEVICE, dtype=torch.float32)
-        out, S = mixer(x, state=S)
+        out, state = mixer(x, state=state)
+        S = state[0] if isinstance(state, tuple) else state
         assert not torch.isnan(out).any(), f"NaN at chunk {chunk}"
         assert not torch.isnan(S).any(), f"NaN in state at chunk {chunk}"
-    print(f"    500 steps clean ✓ | final state norm: {S.norm():.2f}")
+    S_tensor = state[0] if isinstance(state, tuple) else state
+    print(f"    500 steps clean ✓ | final state norm: {S_tensor.norm().item():.2f}")
 test("Stability: no NaN over 500 steps with asymmetric timescales", t5)
 
 # ── TEST 6: Fast head states change faster than slow head states ───────────────
@@ -134,10 +136,12 @@ def t6():
     # Use sequential path to get per-step states
     with torch.no_grad():
         for t_idx in range(10):
-            out, S_new = mixer(x[:, t_idx:t_idx+1], state=S)
-            delta = (S_new - S).norm(dim=(-2,-1)).squeeze(0)  # [H]
+            out, state_new = mixer(x[:, t_idx:t_idx+1], state=S)
+            S_new = state_new[0] if isinstance(state_new, tuple) else state_new
+            S_tensor = S[0] if isinstance(S, tuple) else S
+            delta = (S_new - S_tensor).norm(dim=(-2,-1)).squeeze(0)  # [H]
             state_changes_per_head += delta.cpu()
-            S = S_new
+            S = state_new
     fast_change = state_changes_per_head[:H_half].mean().item()
     slow_change = state_changes_per_head[H_half:].mean().item()
     print(f"    Avg state change — fast heads: {fast_change:.4f} | slow heads: {slow_change:.4f}")
@@ -153,7 +157,7 @@ test("Dynamics: fast and slow heads both update state (nonzero change)", t6)
 def t7():
     mixer = MultiHeadGatedDelta(config, force_sequential=True).to(DEVICE)
     x = torch.randn(B, T, D, device=DEVICE, dtype=torch.float32)
-    out, S = mixer(x, state=None)
+    out, state = mixer(x, state=None)
     out.sum().backward()
     assert mixer.W_lambda.grad is not None, "No gradient for W_lambda"
     per_head_grads = mixer.W_lambda.grad.abs().tolist()

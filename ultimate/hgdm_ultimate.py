@@ -203,9 +203,11 @@ class MultiHeadGatedDelta(nn.Module):
         beta      = beta * clock_gate[None, :, :].to(dtype=x.dtype)
         out_gate = torch.sigmoid(self.W_out_gate(x)).view(B, T, self.H, self.d_v)
 
-        # [STEP-05] Unpack (S, n) state tuple, or init both to None for fresh start
         if state is not None:
-            S_prev, n_prev = state
+            if isinstance(state, tuple):
+                S_prev, n_prev = state
+            else:
+                S_prev, n_prev = state, None
         else:
             S_prev, n_prev = None, None
 

@@ -118,6 +118,10 @@ class OmegaGDM(nn.Module):
         self._core_hw_shape = (H_core, dk_core, dv_core)
         self._ren_hw_shape  = (H_ren,  dk_ren,  dv_ren)
 
+        # Learned head pooling/projection to preserve head-specific structure
+        self.td_head_pool = nn.Parameter(torch.randn(H_core, H_ren) * (H_core ** -0.5))
+        self.bu_head_pool = nn.Parameter(torch.randn(H_ren, H_core) * (H_ren ** -0.5))
+
         self.broadcaster = CausalBroadcaster(config)
 
         renderer_cfg = HGDMConfig(d_model=config.d_byte, n_layers=config.renderer_layers, n_heads=4, d_k=32, d_v=32, d_ff=config.d_byte * 4, use_variable_delta_t=config.use_variable_delta_t)
@@ -171,6 +175,14 @@ class OmegaGDM(nn.Module):
 
         return torch.stack(events, dim=1), cum_prob, byte_pos
 
+    @property
+    def highway_bu_gate(self):
+        return self.bu_gate_net.bias
+
+    @property
+    def highway_td_gate(self):
+        return self.td_gate_net.bias
+
     def _apply_td_highway(self, S_core_last, renderer_state_0, x_core=None):
         # [STEP-05] State is now (S, n) tuple — extract S matrix for highway projection
         S_core = S_core_last[0] if isinstance(S_core_last, tuple) else S_core_last
@@ -181,10 +193,12 @@ class OmegaGDM(nn.Module):
             return (ren_S, ren_n)
             
         B = S_core.shape[0]
-        S_mean = S_core.mean(dim=1)
-        S_mean = self.highway_td_norm(S_mean.reshape(B, -1)).reshape(B, self._core_hw_shape[1], self._core_hw_shape[2])
-        S_proj = self.highway_td_proj_k(S_mean.transpose(-1, -2)).transpose(-1, -2)
-        S_proj = self.highway_td_proj_v(S_proj).unsqueeze(1).expand(-1, self._ren_hw_shape[0], -1, -1)
+        # Pool/project across heads to preserve head-specific structure
+        S_pooled = torch.einsum('bhkd,hr->brkd', S_core, self.td_head_pool)
+        H_ren = self._ren_hw_shape[0]
+        S_norm = self.highway_td_norm(S_pooled.reshape(B, H_ren, -1)).reshape(B, H_ren, self._core_hw_shape[1], self._core_hw_shape[2])
+        S_proj = self.highway_td_proj_k(S_norm.transpose(-1, -2)).transpose(-1, -2)
+        S_proj = self.highway_td_proj_v(S_proj)
         
         if x_core is not None:
             gate = torch.sigmoid(self.td_gate_net(x_core))[:, :, None, None]
@@ -204,10 +218,12 @@ class OmegaGDM(nn.Module):
             return (core_S, core_n)
             
         B = S_ren.shape[0]
-        S_mean = S_ren.mean(dim=1)
-        S_mean = self.highway_bu_norm(S_mean.reshape(B, -1)).reshape(B, self._ren_hw_shape[1], self._ren_hw_shape[2])
-        S_proj = self.highway_bu_proj_k(S_mean.transpose(-1, -2)).transpose(-1, -2)
-        S_proj = self.highway_bu_proj_v(S_proj).unsqueeze(1).expand(-1, self._core_hw_shape[0], -1, -1)
+        # Pool/project across heads to preserve head-specific structure
+        S_pooled = torch.einsum('bhkd,hc->bckd', S_ren, self.bu_head_pool)
+        H_core = self._core_hw_shape[0]
+        S_norm = self.highway_bu_norm(S_pooled.reshape(B, H_core, -1)).reshape(B, H_core, self._ren_hw_shape[1], self._ren_hw_shape[2])
+        S_proj = self.highway_bu_proj_k(S_norm.transpose(-1, -2)).transpose(-1, -2)
+        S_proj = self.highway_bu_proj_v(S_proj)
         
         if x_dec_last is not None:
             gate = torch.sigmoid(self.bu_gate_net(x_dec_last))[:, :, None, None]
@@ -417,10 +433,10 @@ class OmegaGDM(nn.Module):
                 chunk_idx = offset // self.W 
                 
                 # Only compute highway for triggered samples
-                raw_ren_ns_triggered = tuple(t[triggered_indices] for t in raw_ren_ns) if isinstance(raw_ren_ns, tuple) else raw_ren_ns[triggered_indices]
+                raw_ren_ns_triggered = tuple(t[triggered_indices] if t is not None else None for t in raw_ren_ns) if isinstance(raw_ren_ns, tuple) else raw_ren_ns[triggered_indices]
                 core_init_0_triggered = self._apply_bu_highway(
                     raw_ren_ns_triggered, 
-                    (states[1][0][0][triggered_indices], states[1][0][1][triggered_indices]) if states[1][0] is not None else None,
+                    (states[1][0][0][triggered_indices], states[1][0][1][triggered_indices] if states[1][0][1] is not None else None) if states[1][0] is not None else None,
                     x_dec_step[triggered_indices].squeeze(1)
                 )
                 
@@ -428,7 +444,7 @@ class OmegaGDM(nn.Module):
                 core_states_in = [core_init_0_triggered]
                 for i in range(1, self.config.core_layers):
                     if states[1][i] is not None:
-                        core_states_in.append((states[1][i][0][triggered_indices], states[1][i][1][triggered_indices]))
+                        core_states_in.append((states[1][i][0][triggered_indices], states[1][i][1][triggered_indices] if states[1][i][1] is not None else None))
                     else:
                         core_states_in.append(None)
                 
@@ -445,7 +461,7 @@ class OmegaGDM(nn.Module):
                     
                     # FIX: Guard against None states on cold-start streaming
                     if states[1][i] is not None:
-                        old_S, old_n = states[1][i][0][triggered_indices], states[1][i][1][triggered_indices]
+                        old_S, old_n = states[1][i][0][triggered_indices], (states[1][i][1][triggered_indices] if states[1][i][1] is not None else None)
                     else:
                         old_S, old_n = None, None
                     
@@ -456,35 +472,45 @@ class OmegaGDM(nn.Module):
                     else:
                         final_S, final_n = new_S, new_n
                     
-                    # Scatter back to full batch
+                    # Scatter back to full batch in-place to avoid expensive clones
                     full_S = states[1][i][0] if states[1][i] is not None else None
                     full_n = states[1][i][1] if states[1][i] is not None else None
                     
-                    if full_S is not None and full_n is not None:
-                        final_S_full = full_S.clone()
-                        final_n_full = full_n.clone()
-                        final_S_full[triggered_indices] = final_S
-                        final_n_full[triggered_indices] = final_n
-                        next_states[1].append((final_S_full, final_n_full))
+                    if full_S is not None:
+                        if full_S.requires_grad:
+                            full_S = full_S.clone()
+                        full_S[triggered_indices] = final_S
+                        if full_n is not None and final_n is not None:
+                            if full_n.requires_grad:
+                                full_n = full_n.clone()
+                            full_n[triggered_indices] = final_n
+                        next_states[1].append((full_S, full_n))
                     else:
                         # Cold start: create full batch states
                         final_S_full = torch.zeros(B, *final_S.shape[1:], dtype=final_S.dtype, device=final_S.device)
-                        final_n_full = torch.zeros(B, *final_n.shape[1:], dtype=final_n.dtype, device=final_n.device)
+                        final_n_full = torch.zeros(B, *final_n.shape[1:], dtype=final_n.dtype, device=final_n.device) if final_n is not None else None
                         final_S_full[triggered_indices] = final_S
-                        final_n_full[triggered_indices] = final_n
+                        if final_n_full is not None and final_n is not None:
+                            final_n_full[triggered_indices] = final_n
                         next_states[1].append((final_S_full, final_n_full))
 
                 S_core_last = raw_ns
                 new_z_bc = self.broadcaster.proj(x_semantic[:, 0, :]).detach()
                 
-                # Scatter broadcaster output back to full batch
-                z_bc_full = z_bc.clone() if z_bc is not None else torch.zeros_like(x_dec_step[:, 0, :])
-                z_bc_full[triggered_indices] = new_z_bc
+                # Scatter broadcaster output back to full batch in-place
+                if z_bc is not None:
+                    if z_bc.requires_grad:
+                        z_bc = z_bc.clone()
+                    z_bc[triggered_indices] = new_z_bc
+                    z_bc_full = z_bc
+                else:
+                    z_bc_full = torch.zeros_like(x_dec_step[:, 0, :])
+                    z_bc_full[triggered_indices] = new_z_bc
                 new_buf['z_broadcast_cache'] = z_bc_full
                 
                 # Update TD highway (layer 0 renderer state) for triggered samples only
                 if next_states[2][0] is not None:
-                    old_render_S0_S, old_render_S0_n = next_states[2][0][0][triggered_indices], next_states[2][0][1][triggered_indices]
+                    old_render_S0_S, old_render_S0_n = next_states[2][0][0][triggered_indices], (next_states[2][0][1][triggered_indices] if next_states[2][0][1] is not None else None)
                 else:
                     old_render_S0_S, old_render_S0_n = None, None
                 
@@ -496,18 +522,24 @@ class OmegaGDM(nn.Module):
                 new_render_S0_S, new_render_S0_n = new_render_S0
 
                 if next_states[2][0] is not None:
-                    # Scatter triggered samples back to full batch
-                    final_render_S0_S = next_states[2][0][0].clone()
-                    final_render_S0_n = next_states[2][0][1].clone()
-                    final_render_S0_S[triggered_indices] = new_render_S0_S
-                    final_render_S0_n[triggered_indices] = new_render_S0_n
+                    # Modify the newly created layer-0 renderer state in-place (no clone)
+                    render_S0_S, render_S0_n = next_states[2][0]
+                    if render_S0_S.requires_grad:
+                        render_S0_S = render_S0_S.clone()
+                    render_S0_S[triggered_indices] = new_render_S0_S
+                    if render_S0_n is not None and new_render_S0_n is not None:
+                        if render_S0_n.requires_grad:
+                            render_S0_n = render_S0_n.clone()
+                        render_S0_n[triggered_indices] = new_render_S0_n
+                    next_states[2][0] = (render_S0_S, render_S0_n)
                 else:
                     # Cold start: create full batch states
                     final_render_S0_S = torch.zeros(B, *new_render_S0_S.shape[1:], dtype=new_render_S0_S.dtype, device=new_render_S0_S.device)
-                    final_render_S0_n = torch.zeros(B, *new_render_S0_n.shape[1:], dtype=new_render_S0_n.dtype, device=new_render_S0_n.device)
+                    final_render_S0_n = torch.zeros(B, *new_render_S0_n.shape[1:], dtype=new_render_S0_n.dtype, device=new_render_S0_n.device) if new_render_S0_n is not None else None
                     final_render_S0_S[triggered_indices] = new_render_S0_S
-                    final_render_S0_n[triggered_indices] = new_render_S0_n
-                next_states[2][0] = (final_render_S0_S, final_render_S0_n)
+                    if final_render_S0_n is not None and new_render_S0_n is not None:
+                        final_render_S0_n[triggered_indices] = new_render_S0_n
+                    next_states[2][0] = (final_render_S0_S, final_render_S0_n)
             else:
                 next_states[1] = list(states[1])
 

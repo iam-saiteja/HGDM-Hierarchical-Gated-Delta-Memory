@@ -85,7 +85,8 @@ test("alpha: all in [0,1]", t3)
 def t4():
     mixer = MultiHeadGatedDelta(config, force_sequential=True).to(DEVICE)
     x = torch.randn(B, T, D, device=DEVICE, dtype=torch.float32)
-    out, S = mixer(x, state=None)
+    out, state = mixer(x, state=None)
+    S = state[0] if isinstance(state, tuple) else state
     assert not torch.isnan(out).any(), "NaN in output"
     assert not torch.isinf(out).any(), "Inf in output"
     assert not torch.isnan(S).any(), "NaN in state"
@@ -97,7 +98,8 @@ test("Forward pass: no NaN, no Inf", t4)
 def t5():
     mixer = MultiHeadGatedDelta(config, force_sequential=True).to(DEVICE)
     x = torch.randn(B, T, D, device=DEVICE, dtype=torch.float32, requires_grad=True)
-    out, S = mixer(x, state=None)
+    out, state = mixer(x, state=None)
+    S = state[0] if isinstance(state, tuple) else state
     loss = out.sum()
     loss.backward()
     assert mixer.W_delta.weight.grad is not None, "No gradient for W_delta.weight"
@@ -112,7 +114,8 @@ test("Gradient: W_delta.weight.grad is nonzero and finite", t5)
 def t6():
     mixer = MultiHeadGatedDelta(config, force_sequential=True).to(DEVICE)
     x = torch.randn(B, T, D, device=DEVICE, dtype=torch.float32, requires_grad=True)
-    out, S = mixer(x, state=None)
+    out, state = mixer(x, state=None)
+    S = state[0] if isinstance(state, tuple) else state
     loss = out.sum()
     loss.backward()
     assert mixer.W_lambda.grad is not None, "No gradient for W_lambda"

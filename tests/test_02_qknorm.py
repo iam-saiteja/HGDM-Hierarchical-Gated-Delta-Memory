@@ -66,7 +66,8 @@ def t1():
         return original_forward(x, state)
     
     mixer.forward = patched_forward
-    out, S = mixer(x, state=None)
+    out, state = mixer(x, state=None)
+    S = state[0] if isinstance(state, tuple) else state
     
     q = q_captured['q']
     norms = q.norm(dim=-1)  # [B, T, H]
@@ -115,11 +116,12 @@ test("State write bound: ||k^T v||_F <= ||v|| for all positions", t3)
 def t4():
     mixer = MultiHeadGatedDelta(config, force_sequential=True).to(DEVICE)
     state_norms = []
-    S = None
+    state = None
     for chunk in range(25):  # 25 chunks × 20 steps = 500 steps
         x = torch.randn(1, 20, D, device=DEVICE, dtype=torch.float32)
-        out, S = mixer(x, state=S)
-        state_norms.append(S.norm().item())
+        out, state = mixer(x, state=state)
+        S_tensor = state[0] if isinstance(state, tuple) else state
+        state_norms.append(S_tensor.norm().item())
     
     # Check that the norm has plateaued (last 10 chunks don't grow faster than first 10)
     early_growth = state_norms[9] - state_norms[0]
@@ -138,7 +140,8 @@ test("State norm: does not explode over 500 steps", t4)
 def t5():
     mixer = MultiHeadGatedDelta(config, force_sequential=True).to(DEVICE)
     x = torch.randn(B, T, D, device=DEVICE, dtype=torch.float32)
-    out, S = mixer(x, state=None)
+    out, state = mixer(x, state=None)
+    S = state[0] if isinstance(state, tuple) else state
     assert not torch.isnan(out).any(), f"NaN in output"
     assert not torch.isinf(out).any(), f"Inf in output"
     assert not torch.isnan(S).any(), f"NaN in state"
@@ -149,7 +152,7 @@ test("Forward pass: no NaN, no Inf", t5)
 def t6():
     mixer = MultiHeadGatedDelta(config, force_sequential=True).to(DEVICE)
     x = torch.randn(B, T, D, device=DEVICE, dtype=torch.float32)
-    out, S = mixer(x, state=None)
+    out, state = mixer(x, state=None)
     loss = out.sum()
     loss.backward()
     
@@ -217,7 +220,7 @@ def t9():
     
     mixer = MultiHeadGatedDelta(config, force_sequential=False).to(DEVICE)
     x = torch.randn(B, T, D, device=DEVICE, dtype=torch.float32)
-    out, S = mixer(x, state=None)
+    out, state = mixer(x, state=None)
     assert not torch.isnan(out).any(), "NaN in Triton fast-path output"
     assert not torch.isinf(out).any(), "Inf in Triton fast-path output"
     print(f"    Triton fast path: OK, out={out.shape}")
