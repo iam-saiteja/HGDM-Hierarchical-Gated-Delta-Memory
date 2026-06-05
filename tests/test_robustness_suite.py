@@ -89,41 +89,54 @@ def test_boundary_mask_edge_cases():
 
 def test_tuner_parity():
     print("\n--- Test 6: Triton vs Fallback Parity ---")
-    config = HGDMConfig(
-        use_rope=True,
-        use_state_fusion=True,
-        use_epistemic_gate=True,
-        n_grad_mode="exact",
-        n_layers=2
-    )
-    
-    # Run in sequential path (Triton disabled)
-    model_seq = HGDMUltimate(config, force_sequential=True).to(DEVICE)
-    # Run in fast path (Triton enabled)
-    model_triton = HGDMUltimate(config, force_sequential=False).to(DEVICE)
-    
-    # Share weights
-    model_triton.load_state_dict(model_seq.state_dict())
-    
-    # Set to eval mode to disable dropout
-    model_seq.eval()
-    model_triton.eval()
-    
-    x = torch.randint(0, 256, (2, 64), device=DEVICE)
-    
-    # Forward parity
-    with torch.no_grad():
-        out_seq, _ = model_seq(x)
-        out_tri, _ = model_triton(x)
-    
-    print("out_seq shape:", out_seq.shape)
-    print("out_tri shape:", out_tri.shape)
-    print("out_seq slice:", out_seq[0, 0, :5].tolist())
-    print("out_tri slice:", out_tri[0, 0, :5].tolist())
-    
-    diff = (out_seq - out_tri).abs().max().item()
-    print(f"Max absolute forward discrepancy: {diff:.6f}")
-    assert diff < 1e-2, f"Parity discrepancy too large! Diff={diff}"
+    for use_gate in [True, False]:
+        print(f"Testing with use_epistemic_gate={use_gate}...")
+        config = HGDMConfig(
+            use_rope=True,
+            use_state_fusion=True,
+            use_epistemic_gate=use_gate,
+            n_grad_mode="exact",
+            n_layers=2
+        )
+        
+        # Run in sequential path (Triton disabled)
+        model_seq = HGDMUltimate(config, force_sequential=True).to(DEVICE)
+        # Run in fast path (Triton enabled)
+        model_triton = HGDMUltimate(config, force_sequential=False).to(DEVICE)
+        
+        # Share weights
+        model_triton.load_state_dict(model_seq.state_dict())
+        
+        # Set to eval mode to disable dropout
+        model_seq.eval()
+        model_triton.eval()
+        
+        x = torch.randint(0, 256, (2, 64), device=DEVICE)
+        
+        # Forward parity
+        with torch.no_grad():
+            out_seq, states_seq = model_seq(x)
+            out_tri, states_tri = model_triton(x)
+        
+        diff = (out_seq - out_tri).abs().max().item()
+        print(f"  Max absolute forward discrepancy: {diff:.6f}")
+        assert diff < 1e-2, f"Parity discrepancy too large! Diff={diff}"
+        
+        # Verify states
+        for l_idx, (s_seq_tup, s_tri_tup) in enumerate(zip(states_seq, states_tri)):
+            S_seq, n_seq = s_seq_tup
+            S_tri, n_tri = s_tri_tup
+            
+            s_diff = (S_seq - S_tri).abs().max().item()
+            assert s_diff < 1e-2, f"State S discrepancy too large at layer {l_idx}: {s_diff}"
+            
+            if use_gate:
+                assert n_seq is not None and n_tri is not None
+                n_diff = (n_seq - n_tri).abs().max().item()
+                assert n_diff < 1e-2, f"State n discrepancy too large at layer {l_idx}: {n_diff}"
+            else:
+                assert n_seq is None and n_tri is None, f"State n should be None when use_epistemic_gate=False"
+                
     print("Test 6 Passed!")
 
 if __name__ == "__main__":

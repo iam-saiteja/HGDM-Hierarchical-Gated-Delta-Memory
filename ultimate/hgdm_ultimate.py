@@ -5,10 +5,11 @@ import math
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
 try:
-    from kernel_nitro import fused_nitro_scan, fused_vector_scan
+    from kernel_nitro import fused_nitro_scan, fused_vector_scan, fused_nitro_scan_with_n
 except (ImportError, Exception):
     fused_nitro_scan = None
     fused_vector_scan = None
+    fused_nitro_scan_with_n = None
 
 # =============================================================================
 # 1. THE CONFIGURATION (120M Baseline)
@@ -73,8 +74,8 @@ class RoPEEmbedding(nn.Module):
             t = torch.arange(new_max, device=x.device, dtype=torch.float32)
             freqs = torch.outer(t, self.inv_freq.to(x.device))
             emb = torch.cat((freqs, freqs), dim=-1)
-            self.cos_cached = emb.cos()
-            self.sin_cached = emb.sin()
+            self.register_buffer("cos_cached", emb.cos(), persistent=False)
+            self.register_buffer("sin_cached", emb.sin(), persistent=False)
             
         cos = self.cos_cached[offset:total_len].to(x.device)
         sin = self.sin_cached[offset:total_len].to(x.device)
@@ -220,25 +221,21 @@ class MultiHeadGatedDelta(nn.Module):
                 q.requires_grad or k.requires_grad or v.requires_grad or alpha.requires_grad or beta.requires_grad
             )
 
-            from kernel_nitro import fused_nitro_scan_with_n
-            out, S, n_stack_full = fused_nitro_scan_with_n(q, k, v, alpha, beta, state=S_prev, initial_n=n_prev, chunk_size=32)
-            
             if use_epistemic_gate:
+                out, S, n_stack_full = fused_nitro_scan_with_n(q, k, v, alpha, beta, state=S_prev, initial_n=n_prev, chunk_size=32)
                 n_stack = n_stack_full.transpose(1, 2)  # [B, H, T, dk] -> [B, T, H, dk]
                 if needs_grad and n_grad_mode == "detached":
                     n_stack = n_stack.detach()
                 n = n_stack[:, -1, :, :]
-            else:
-                n = n_stack_full[:, :, -1, :].clone()  # Just extract the final state
-                n_stack = None
-
-            # [STEP-05] Normalize and Epistemic Gate
-            if use_epistemic_gate and n_stack is not None:
+                
+                # [STEP-05] Normalize and Epistemic Gate
                 n_inf  = n_stack.abs().max(dim=-1)[0]                # [B, T, H]
                 denom  = torch.clamp(n_inf, min=1.0).unsqueeze(-1)   # [B, T, H, 1]
                 conf   = torch.tanh(n_stack.norm(dim=-1)).unsqueeze(-1)  # [B, T, H, 1]
                 out    = (out / denom) * out_gate * conf
             else:
+                out, S = fused_nitro_scan(q, k, v, alpha, beta, state=S_prev, chunk_size=32)
+                n = None
                 out    = out * out_gate
                 
             out    = out.reshape(B, T, -1)
@@ -248,15 +245,18 @@ class MultiHeadGatedDelta(nn.Module):
             # SEQUENTIAL PATH: Pure PyTorch fallback
             use_epistemic_gate = getattr(self.config, "use_epistemic_gate", True)
             S = S_prev if S_prev is not None else torch.zeros(B, self.H, self.d_k, self.d_v, device=x.device, dtype=x.dtype)
-            n = n_prev if n_prev is not None else torch.zeros(B, self.H, self.d_k, device=x.device, dtype=x.dtype)
+            if use_epistemic_gate:
+                n = n_prev if n_prev is not None else torch.zeros(B, self.H, self.d_k, device=x.device, dtype=x.dtype)
+            else:
+                n = None
             outputs = []
             for t in range(T):
                 delta = torch.einsum('bhk,bhd->bhkd', k[:, t], v[:, t])
                 S = alpha[:, t, :, None, None] * S + beta[:, t, :, None, None] * delta
-                n = alpha[:, t, :, None] * n + beta[:, t, :, None] * k[:, t]
                 
                 out_t  = torch.einsum('bhkd,bhk->bhd', S, q[:, t])
                 if use_epistemic_gate:
+                    n = alpha[:, t, :, None] * n + beta[:, t, :, None] * k[:, t]
                     n_inf  = n.abs().max(dim=-1)[0]                    # [B, H]
                     denom  = torch.clamp(n_inf, min=1.0).unsqueeze(-1) # [B, H, 1]
                     conf   = torch.tanh(n.norm(dim=-1)).unsqueeze(-1)   # [B, H, 1]
@@ -299,7 +299,10 @@ class CrossLayerStateFusion(nn.Module):
         if S_prev is None or S_current is None:
             return current_ns
         S_fused = S_current + gate * S_prev                # additive state highway
-        n_fused = n_current + gate.squeeze(-1) * n_prev    # gate is [1, H, 1, 1], squeeze(-1) makes it [1, H, 1] for broadcasting to d_k
+        if n_current is not None and n_prev is not None:
+            n_fused = n_current + gate.squeeze(-1) * n_prev    # gate is [1, H, 1, 1], squeeze(-1) makes it [1, H, 1] for broadcasting to d_k
+        else:
+            n_fused = None
         return (S_fused, n_fused)
 
 class HGDMUltimate(nn.Module):
@@ -373,6 +376,7 @@ class HGDMUltimate(nn.Module):
             return prompt_bytes
         self.eval()
         generated = [prompt_bytes]
+        temp = max(temp, 1e-4)
         logits, states = self.forward(prompt_bytes)
         next_logit = logits[:, -1, :] / temp
         next_probs = F.softmax(next_logit, dim=-1)

@@ -898,7 +898,6 @@ class FusedNitroScanWithN(torch.autograd.Function):
             da.transpose(1,2).to(dtype),
             db.transpose(1,2).to(dtype),
             dinitial_state.to(dtype) if has_init else None,
-            None,  # initial_n has no gradient yet
             None,  # chunk_size has no gradient
         )
 
