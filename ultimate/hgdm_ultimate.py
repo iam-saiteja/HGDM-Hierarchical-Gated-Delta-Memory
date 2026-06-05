@@ -204,19 +204,23 @@ class MultiHeadGatedDelta(nn.Module):
 
         if not self.force_sequential and fused_nitro_scan is not None and q.is_cuda:
             # FAST PATH: Triton kernel handles the expensive S recurrence
-            out, S = fused_nitro_scan(q, k, v, alpha, beta, S_prev)
-
-            # [STEP-05] n_t recurrence in Triton (fast parallel scan)
             try:
-                from kernel_nitro import fused_vector_scan
-                n_stack, n = fused_vector_scan(alpha, beta, k, initial_n=n_prev, chunk_size=32)
+                from kernel_nitro import fused_nitro_scan_with_n
+                out, S, n_stack = fused_nitro_scan_with_n(q, k, v, alpha, beta, state=S_prev, initial_n=n_prev, chunk_size=32)
+                n_stack = n_stack.transpose(1, 2)  # [B, H, T, dk] -> [B, T, H, dk]
+                n = n_stack[:, -1, :, :]
             except ImportError:
-                n = n_prev if n_prev is not None else torch.zeros(B, self.H, self.d_k, device=x.device, dtype=x.dtype)
-                n_list = []
-                for t in range(T):
-                    n = alpha[:, t, :, None] * n + beta[:, t, :, None] * k[:, t]
-                    n_list.append(n)
-                n_stack = torch.stack(n_list, dim=1)  # [B, T, H, d_k]
+                out, S = fused_nitro_scan(q, k, v, alpha, beta, S_prev)
+                try:
+                    from kernel_nitro import fused_vector_scan
+                    n_stack, n = fused_vector_scan(alpha, beta, k, initial_n=n_prev, chunk_size=32)
+                except ImportError:
+                    n = n_prev if n_prev is not None else torch.zeros(B, self.H, self.d_k, device=x.device, dtype=x.dtype)
+                    n_list = []
+                    for t in range(T):
+                        n = alpha[:, t, :, None] * n + beta[:, t, :, None] * k[:, t]
+                        n_list.append(n)
+                    n_stack = torch.stack(n_list, dim=1)  # [B, T, H, d_k]
 
             # [STEP-05] Normalize: out = (q @ S) / max(||n||_inf, 1)
             n_inf  = n_stack.abs().max(dim=-1)[0]                # [B, T, H]
