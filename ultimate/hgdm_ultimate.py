@@ -73,8 +73,9 @@ class RoPEEmbedding(nn.Module):
             t = torch.arange(new_max, device=x.device, dtype=torch.float32)
             freqs = torch.outer(t, self.inv_freq.to(x.device))
             emb = torch.cat((freqs, freqs), dim=-1)
-            self.register_buffer("cos_cached", emb.cos(), persistent=False)
-            self.register_buffer("sin_cached", emb.sin(), persistent=False)
+            # Direct reassignment updates the buffer in self._buffers without register_buffer() overhead
+            self.cos_cached = emb.cos()
+            self.sin_cached = emb.sin()
             
         cos = self.cos_cached[offset:total_len].to(x.device)
         sin = self.sin_cached[offset:total_len].to(x.device)
