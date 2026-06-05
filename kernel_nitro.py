@@ -369,7 +369,7 @@ class FusedNitroEngine(torch.autograd.Function):
             num_stages=2,   # FIX 2: prefetch next chunk while processing current
         )
 
-        ctx.save_for_backward(q_s, k_s, v_s, a_s, b_s, states, is_s)
+        ctx.save_for_backward(q_s, k_s, v_s, a_s, b_s, is_s)
         ctx.dtype      = dtype
         ctx.chunk_size = chunk_size
         ctx.has_init   = has_init                      # FIX 7
@@ -377,12 +377,35 @@ class FusedNitroEngine(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, dstate):
-        q_s, k_s, v_s, a_s, b_s, states, is_s = ctx.saved_tensors
+        q_s, k_s, v_s, a_s, b_s, is_s = ctx.saved_tensors
         B, H, T = q_s.shape[:3]
         dk = q_s.shape[3]
         dv = v_s.shape[3]
         chunk_size = ctx.chunk_size
         has_init = ctx.has_init
+
+        # [VRAM Recomputation] Regenerate states dynamically instead of storing across 18 layers
+        num_chunks = (T + chunk_size - 1) // chunk_size
+        states = torch.empty((B, H, num_chunks, dk, dv), device=q_s.device, dtype=torch.float32)
+        out_dummy = torch.empty((B, H, T, dv), device=q_s.device, dtype=torch.float32)
+        grid_fwd = (B, H)
+        _chunk_fwd_kernel[grid_fwd](
+            q_s, k_s, v_s, a_s, b_s, out_dummy, states, is_s, T,
+            has_init,
+            dk, dv, chunk_size,
+            q_s.stride(0), q_s.stride(1), q_s.stride(2), q_s.stride(3),
+            k_s.stride(0), k_s.stride(1), k_s.stride(2), k_s.stride(3),
+            v_s.stride(0), v_s.stride(1), v_s.stride(2), v_s.stride(3),
+            a_s.stride(0), a_s.stride(1), a_s.stride(2),
+            b_s.stride(0), b_s.stride(1), b_s.stride(2),
+            states.stride(0), states.stride(1), states.stride(2), states.stride(3), states.stride(4),
+            is_s.stride(0) if has_init else 0,
+            is_s.stride(1) if has_init else 0,
+            is_s.stride(2) if has_init else 0,
+            is_s.stride(3) if has_init else 0,
+            num_warps=4,
+            num_stages=2,
+        )
 
         dout_s = dout.transpose(1, 2).contiguous().float()
         dq = torch.empty_like(q_s)

@@ -311,12 +311,9 @@ class OmegaGDM(nn.Module):
             boundary_prob = torch.sigmoid(boundary_logit).squeeze(-1).squeeze(-1) # [B]
             
             new_cum_prob = cum_prob + boundary_prob
-            trigger_flag = (new_cum_prob >= 1.0).any().item()
+            trigger_mask = new_cum_prob >= 1.0
             
-            if trigger_flag:
-                final_cum_prob = new_cum_prob - 1.0
-            else:
-                final_cum_prob = new_cum_prob
+            final_cum_prob = torch.where(trigger_mask, new_cum_prob - 1.0, new_cum_prob)
 
             new_buf = {
                 'cum_prob': final_cum_prob,
@@ -325,7 +322,7 @@ class OmegaGDM(nn.Module):
                 'x_dec_last': x_dec_step.squeeze(1).detach()
             }
 
-            if trigger_flag:
+            if trigger_mask.any().item():
                 x_sem_chunk = self.decimator_proj(self.decimator_norm(x_dec_step))
                 x_sem_chunk = x_sem_chunk * boundary_prob.unsqueeze(1).unsqueeze(2)
                 
@@ -337,17 +334,35 @@ class OmegaGDM(nn.Module):
 
                 x_semantic = x_sem_chunk
                 prev_raw_ns = None
+                
+                trigger_mask_S = trigger_mask.view(B, 1, 1, 1)
+                trigger_mask_n = trigger_mask.view(B, 1, 1)
+
                 for i, layer in enumerate(self.semantic_core):
                     x_semantic, ns = layer(x_semantic, core_states_in[i], offset=chunk_idx)
                     raw_ns = ns
                     if self.config.use_state_fusion and i > 0 and prev_raw_ns is not None:
                         ns = self.core_state_fusion.fuse(ns, prev_raw_ns, i)
                     prev_raw_ns = raw_ns
-                    next_states[1].append(ns)
+                    
+                    # Selective update for batched heterogeneous triggering
+                    old_S, old_n = states[1][i]
+                    new_S, new_n = ns
+                    final_S = torch.where(trigger_mask_S, new_S, old_S)
+                    final_n = torch.where(trigger_mask_n, new_n, old_n)
+                    next_states[1].append((final_S, final_n))
 
                 S_core_last = raw_ns
-                new_buf['z_broadcast_cache'] = self.broadcaster.proj(x_semantic[:, 0, :]).detach()
-                next_states[2][0] = self._apply_td_highway(S_core_last, next_states[2][0], x_semantic[:, 0, :])
+                new_z_bc = self.broadcaster.proj(x_semantic[:, 0, :]).detach()
+                new_buf['z_broadcast_cache'] = torch.where(trigger_mask.unsqueeze(-1), new_z_bc, z_bc)
+                
+                # Update TD highway (layer 0 renderer state)
+                new_render_S0 = self._apply_td_highway(S_core_last, next_states[2][0], x_semantic[:, 0, :])
+                old_render_S0_S, old_render_S0_n = next_states[2][0]
+                new_render_S0_S, new_render_S0_n = new_render_S0
+                final_render_S0_S = torch.where(trigger_mask_S, new_render_S0_S, old_render_S0_S)
+                final_render_S0_n = torch.where(trigger_mask_n, new_render_S0_n, old_render_S0_n)
+                next_states[2][0] = (final_render_S0_S, final_render_S0_n)
             else:
                 next_states[1] = list(states[1])
 
@@ -412,7 +427,7 @@ def latent_think(model, states, n_thoughts=8, temp=0.3, offset=0):
             return_latent=True
         )
         logit = logits[:, -1, :] / temp
-        char_idx = torch.argmax(logit, dim=-1).item()
+        char_idx = torch.argmax(logit, dim=-1).cpu().tolist()
         thought_tokens.append(char_idx)
         offset += 1
         

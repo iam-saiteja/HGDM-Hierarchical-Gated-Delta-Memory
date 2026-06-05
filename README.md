@@ -25,14 +25,15 @@
 
 ## Overview
 
-**HGDM** (Hierarchical Gated Delta Memory) is an attention-free, byte-level sequence modeling architecture designed to overcome the quadratic memory bottleneck of Transformers and the high-frequency noise limitations of traditional state-space models. 
+**HGDM** (Hierarchical Gated Delta Memory) is a completely **attention-free**, byte-level sequence modeling architecture. It is built to completely eliminate the quadratic memory wall $O(T^2)$ of traditional Transformers, achieving infinite context lengths with zero VRAM scaling during generation.
 
-HGDM replaces self-attention with a **multi-scale gated multiplicative recurrent state** coupled with **hierarchical temporal decimation**. By downsampling input sequences into low-frequency semantic chunks and utilizing bi-directional state highways, HGDM achieves:
+Recent updates to the **OmegaGDM** architecture have introduced massive upgrades over the base model, giving it advanced reasoning and compression capabilities while remaining purely recurrent:
 
+- **100% Attention-Free**: No Self-Attention mechanisms are used anywhere in the model. Everything is processed via purely recurrent $O(T)$ Multi-Head Gated Delta memory scans.
+- **Content-Aware Decimation**: Replaces static window downsampling. The model dynamically predicts token boundaries and selectively compresses only the least informative bytes, preserving exact timing for crucial semantic boundaries.
+- **Latent Thinking ("Think Before You Speak")**: The autoregressive generation loop can advance the recurrent memory state without consuming any new input bytes, allowing the model to "ponder" and build complex reasoning plans before outputting a token.
+- **Multi-Token Prediction (MTP)**: The model uses 4 specialized output heads to predict the next 4 bytes simultaneously in a single forward pass, dramatically improving training efficiency and local syntax alignment.
 - **$O(1)$ Autoregressive Generation Memory**: VRAM footprint remains completely constant during generation, independent of the context length.
-- **$O(1)$ Step Complexity**: Generation throughput (bytes/sec) is decoupled from context length, eliminating the quadratic slowdown of self-attention.
-- **Native Byte-Level Modeling**: Processes raw UTF-8 bytes directly (vocabulary size 256), bypassing tokenization and vocabulary bias.
-- **Multi-scale Temporal Abstraction**: Automatically separates local syntax (short decay timescales) from global semantics (extremely long timescales).
 
 ---
 
@@ -76,18 +77,18 @@ Where:
 
 ### Hierarchical Temporal Decimation (HTD)
 
-To isolate semantic modeling from high-frequency character noise, HGDM introduces **Temporal Decimation** with a window rate of $W$ (typically $W = 8$). The sequence flows through five distinct operations:
+To isolate semantic modeling from high-frequency character noise, HGDM introduces **Temporal Decimation**. The OmegaGDM upgrade shifts from static windowing to **Content-Aware Decimation**, allowing the model to dynamically choose which bytes to merge based on information density:
 
 1. **Byte Catcher (Input Stage)**: 
-   Processes raw UTF-8 character sequences at original length $T$ using a small hidden dimension ($d_{byte} = 256$). The forget gates are initialized to short timescales ($\tau \approx 12$ steps) to process local syntactic structure.
-2. **Decimator Layer**: 
-   Downsamples the sequence length from $T$ to $T/W$ by extracting the catcher's final state at the end of each window boundary. The downsampled representations are projected into a higher-dimensional semantic space ($d_{model} = 768$ or $2048$).
+   Processes raw UTF-8 character sequences at original length $T$.
+2. **Content-Aware Decimator**: 
+   A specialized boundary head outputs a probability for each byte. Instead of blindly downsampling every 8 bytes, the model triggers a semantic update only when the cumulative probability crosses 1.0. This ensures high-information density bytes are preserved individually, while whitespace/filler bytes are heavily compressed.
 3. **Semantic Core (Deep Processing)**: 
-   Operates on the decimated sequence of length $T/W$. Consisting of deep recurrent layers (12 to 18 layers), it uses large head allocations with extremely slow forget rates ($\tau \approx 500$ to $95,000+$ steps) to maintain long-term context.
+   Operates on the dynamically decimated sequence. Consisting of deep recurrent layers, it uses large head allocations with extremely slow forget rates to maintain long-term context spanning millions of uncompressed bytes.
 4. **Causal Broadcaster**: 
-   Causally upsamples the processed semantic features from $T/W$ back to the original sequence length $T$ by repeating chunk states, projecting the features back to $d_{byte}$.
-5. **Byte Renderer (Output Stage)**: 
-   Fuses the original byte representations with the upsampled semantic core states, predicting the log-probability distribution for the next byte.
+   Causally upsamples the processed semantic features back to the original sequence length $T$ by repeating the chunk states.
+5. **Multi-Token Byte Renderer (MTP Stage)**: 
+   Fuses the original byte representations with the semantic core states. Instead of just predicting $T+1$, the network predicts $T+1, T+2, T+3, \text{and } T+4$ simultaneously via 4 independent heads.
 
 ---
 

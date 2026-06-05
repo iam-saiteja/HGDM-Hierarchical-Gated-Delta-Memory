@@ -271,10 +271,14 @@ class CrossLayerStateFusion(nn.Module):
         self.fusion_gate = nn.Parameter(torch.full((config.n_layers, config.n_heads), -4.0))
 
     def fuse(self, current_ns, prev_layer_ns, layer_idx):
+        if prev_layer_ns is None or current_ns is None:
+            return current_ns
         gate = torch.sigmoid(self.fusion_gate[layer_idx])  # [H]
         gate = gate[None, :, None, None]                   # broadcast to [1, H, 1, 1]
         S_current, n_current = current_ns
         S_prev, _ = prev_layer_ns
+        if S_prev is None or S_current is None:
+            return current_ns
         S_fused = S_current + gate * S_prev                # additive state highway
         return (S_fused, n_current)
 
@@ -286,6 +290,7 @@ class HGDMUltimate(nn.Module):
         
         # Bug 2 Fix: Configure positional embedding size from configuration to save VRAM
         if getattr(config, "use_rope", False):
+            assert config.d_k % 2 == 0, "RoPE requires even d_k"
             self.pos_embedding = None
         else:
             self.pos_embedding = nn.Parameter(
