@@ -2,7 +2,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
-from ultimate.hgdm_ultimate import HGDMLayer, RMSNorm, HGDMConfig, CrossLayerStateFusion
+
+# Import with fallback for portability
+try:
+    from ultimate.hgdm_ultimate import HGDMLayer, RMSNorm, HGDMConfig, CrossLayerStateFusion
+except (ImportError, ModuleNotFoundError):
+    # Fallback: Try relative import
+    try:
+        from .ultimate.hgdm_ultimate import HGDMLayer, RMSNorm, HGDMConfig, CrossLayerStateFusion
+    except (ImportError, ModuleNotFoundError, ValueError):
+        # If both fail, raise with helpful message
+        raise ImportError(
+            "Could not import HGDMLayer from ultimate.hgdm_ultimate. "
+            "Ensure ultimate/ is in your Python path or run from project root."
+        )
 
 # =============================================================================
 # OMEGAGDM V2 — Hierarchical Temporal Decimation (Bugfixed)
@@ -203,7 +216,11 @@ class OmegaGDM(nn.Module):
                 crossings[:, 1:] = floors[:, 1:] > floors[:, :-1]
                 crossings[:, 0] = floors[:, 0] >= 1.0
                 
-                # Fully vectorized top-k selection prioritizes triggered crossings, then highest probabilities
+                # FULL-SEQUENCE DECIMATION POLICY:
+                # Fully vectorized top-k selection prioritizes triggered crossings, then highest probabilities.
+                # This is used in training/full-pass inference where we control exactly which positions
+                # become semantic tokens. Crossings (integer threshold crossings) are weighted 10x more
+                # than raw boundary probability to prioritize content-aware boundaries.
                 score = boundary_prob + crossings.float() * 10.0
                 _, top_idx = torch.topk(score, k=N, dim=-1)
                 selected_indices, _ = torch.sort(top_idx, dim=-1) # [B, N]
@@ -305,7 +322,12 @@ class OmegaGDM(nn.Module):
                 raw_ren_ns = ns
                 next_states[2].append(ns)
 
-            # Compute boundary probability
+            # STREAMING DECIMATION POLICY:
+            # In streaming inference (T==1), we use per-sample cumulative threshold triggering.
+            # When cumulative boundary probability crosses an integer (1.0, 2.0, etc.), we create
+            # a new semantic token. This is the online equivalent of the full-sequence top-k policy.
+            # Note: This produces slightly different decimation boundaries than training (top-k on
+            # full sequence). To exactly match training behavior, use full-sequence forward pass.
             boundary_logit = self.boundary_head(x_byte) # [B, 1, 1]
             boundary_prob = torch.sigmoid(boundary_logit).squeeze(-1).squeeze(-1) # [B]
             
