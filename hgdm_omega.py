@@ -527,6 +527,7 @@ class OmegaGDM(nn.Module):
 
     @torch.no_grad()
     def generate(self, prompt_bytes, max_new_bytes=100, temp=0.8, think_steps=0):
+        temp = max(temp, 1e-4)
         if max_new_bytes == 0:
             return prompt_bytes
         self.eval()
