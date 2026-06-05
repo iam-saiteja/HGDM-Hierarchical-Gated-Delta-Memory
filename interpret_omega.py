@@ -95,10 +95,13 @@ class GDMProbe:
                     S = alpha[:, t, :, None, None] * S + beta[:, t, :, None, None] * delta
                     # Per-head Frobenius norm
                     norm = S.reshape(B, H, -1).norm(dim=-1)      # (B, H)
-                    state_norms.append(norm[0].cpu().tolist())    # take batch 0
+                    state_norms.append(norm[0])    # take batch 0
                     # Write magnitude = beta * ||k_t|| * ||v_t||
                     wm = beta[:, t] * k[:, t].norm(dim=-1) * v[:, t].norm(dim=-1)
-                    write_magnitudes.append(wm[0].cpu().tolist())
+                    write_magnitudes.append(wm[0])
+                
+                state_norms = torch.stack(state_norms).cpu().tolist()
+                write_magnitudes = torch.stack(write_magnitudes).cpu().tolist()
 
             self.records[name] = {
                 "alpha":            alpha[0].cpu().tolist(),         # (T, H)

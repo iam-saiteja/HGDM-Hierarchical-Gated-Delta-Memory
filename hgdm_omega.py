@@ -51,10 +51,10 @@ class OmegaGDM(nn.Module):
 
         self.embedding = nn.Embedding(config.vocab_size, config.d_byte)
 
-        catcher_cfg = HGDMConfig(d_model=config.d_byte, n_layers=config.catcher_layers, n_heads=4, d_k=32, d_v=32, d_ff=config.d_byte * 4)
+        catcher_cfg = HGDMConfig(d_model=config.d_byte, n_layers=config.catcher_layers, n_heads=4, d_k=32, d_v=32, d_ff=config.d_byte * 4, use_variable_delta_t=config.use_variable_delta_t)
         self.byte_catcher = nn.ModuleList([HGDMLayer(catcher_cfg, i, force_sequential) for i in range(config.catcher_layers)])
 
-        decimator_cfg = HGDMConfig(d_model=config.d_byte, n_layers=1, n_heads=4, d_k=32, d_v=32, d_ff=config.d_byte * 4)
+        decimator_cfg = HGDMConfig(d_model=config.d_byte, n_layers=1, n_heads=4, d_k=32, d_v=32, d_ff=config.d_byte * 4, use_variable_delta_t=config.use_variable_delta_t)
         self.decimator_layer = HGDMLayer(decimator_cfg, 0, force_sequential)
         self.decimator_proj = nn.Linear(config.d_byte, config.d_model, bias=False)
         self.decimator_norm = RMSNorm(config.d_byte)
@@ -104,7 +104,7 @@ class OmegaGDM(nn.Module):
 
         self.broadcaster = CausalBroadcaster(config)
 
-        renderer_cfg = HGDMConfig(d_model=config.d_byte, n_layers=config.renderer_layers, n_heads=4, d_k=32, d_v=32, d_ff=config.d_byte * 4)
+        renderer_cfg = HGDMConfig(d_model=config.d_byte, n_layers=config.renderer_layers, n_heads=4, d_k=32, d_v=32, d_ff=config.d_byte * 4, use_variable_delta_t=config.use_variable_delta_t)
         self.byte_renderer = nn.ModuleList([HGDMLayer(renderer_cfg, i, force_sequential) for i in range(config.renderer_layers)])
 
         self.norm_f  = RMSNorm(config.d_byte)
@@ -203,20 +203,10 @@ class OmegaGDM(nn.Module):
                 crossings[:, 1:] = floors[:, 1:] > floors[:, :-1]
                 crossings[:, 0] = floors[:, 0] >= 1.0
                 
-                selected_indices = []
-                for b in range(B):
-                    idx = torch.nonzero(crossings[b]).squeeze(-1)
-                    if idx.numel() > N:
-                        idx = idx[:N]
-                    elif idx.numel() < N:
-                        needed = N - idx.numel()
-                        prob_masked = boundary_prob[b].clone()
-                        prob_masked[idx] = -1.0
-                        _, top_idx = torch.topk(prob_masked, k=needed)
-                        idx = torch.cat([idx, top_idx])
-                    idx = torch.sort(idx)[0]
-                    selected_indices.append(idx)
-                selected_indices = torch.stack(selected_indices) # [B, N]
+                # Fully vectorized top-k selection prioritizes triggered crossings, then highest probabilities
+                score = boundary_prob + crossings.float() * 10.0
+                _, top_idx = torch.topk(score, k=N, dim=-1)
+                selected_indices, _ = torch.sort(top_idx, dim=-1) # [B, N]
                 
                 boundary_prob_selected = torch.gather(boundary_prob, 1, selected_indices) # [B, N]
                 x_semantic_in = torch.gather(x_dec, 1, selected_indices.unsqueeze(-1).expand(-1, -1, x_dec.shape[-1]))
@@ -321,7 +311,7 @@ class OmegaGDM(nn.Module):
             boundary_prob = torch.sigmoid(boundary_logit).squeeze(-1).squeeze(-1) # [B]
             
             new_cum_prob = cum_prob + boundary_prob
-            trigger_flag = (new_cum_prob[0] >= 1.0).item()
+            trigger_flag = (new_cum_prob >= 1.0).any().item()
             
             if trigger_flag:
                 final_cum_prob = new_cum_prob - 1.0
@@ -377,6 +367,8 @@ class OmegaGDM(nn.Module):
 
     @torch.no_grad()
     def generate(self, prompt_bytes, max_new_bytes=100, temp=0.8, think_steps=0):
+        if max_new_bytes == 0:
+            return prompt_bytes
         self.eval()
         generated = prompt_bytes
         logits, states = self.forward(prompt_bytes)
@@ -399,7 +391,10 @@ class OmegaGDM(nn.Module):
 def latent_think(model, states, n_thoughts=8, temp=0.3, offset=0):
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
-    B = 1
+    if states is not None and states[0] is not None and len(states[0]) > 0:
+        B = states[0][0][0].shape[0] if isinstance(states[0][0], tuple) else states[0][0].shape[0]
+    else:
+        B = 1
     
     # Initialize thinking using embedding of a dummy zero byte
     x_byte = model.embedding(torch.zeros(B, 1, dtype=torch.long, device=device))

@@ -4,7 +4,10 @@ import torch.nn.functional as F
 import math
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
-from kernel_nitro import fused_nitro_scan
+try:
+    from kernel_nitro import fused_nitro_scan
+except (ImportError, Exception):
+    fused_nitro_scan = None
 
 # =============================================================================
 # 1. THE CONFIGURATION (120M Baseline)
@@ -16,7 +19,7 @@ class HGDMConfig:
     n_heads: int = 12          
     d_k: int = 64              
     d_v: int = 64              
-    d_ff: int = 3072           
+    d_ff: int = 2048           
     vocab_size: int = 256      
     use_variable_delta_t: bool = True   # [STEP-01] Time-based model: content-driven Δt decay (CfC/Mamba)
     use_state_fusion: bool = False      # Feature 6: Cross-Layer State Fusion (State Highways)
@@ -203,14 +206,17 @@ class MultiHeadGatedDelta(nn.Module):
             # FAST PATH: Triton kernel handles the expensive S recurrence
             out, S = fused_nitro_scan(q, k, v, alpha, beta, S_prev)
 
-            # [STEP-05] n_t recurrence in PyTorch — cheap O(T*H*d_k), no kernel change needed
-            # n_t = alpha_t * n_{t-1} + beta_t * k_t  (tracks write accumulation per key dim)
-            n = n_prev if n_prev is not None else torch.zeros(B, self.H, self.d_k, device=x.device, dtype=x.dtype)
-            n_list = []
-            for t in range(T):
-                n = alpha[:, t, :, None] * n + beta[:, t, :, None] * k[:, t]
-                n_list.append(n)
-            n_stack = torch.stack(n_list, dim=1)  # [B, T, H, d_k]
+            # [STEP-05] n_t recurrence in Triton (fast parallel scan)
+            try:
+                from kernel_nitro import fused_vector_scan
+                n_stack, n = fused_vector_scan(alpha, beta, k, initial_n=n_prev, chunk_size=32)
+            except ImportError:
+                n = n_prev if n_prev is not None else torch.zeros(B, self.H, self.d_k, device=x.device, dtype=x.dtype)
+                n_list = []
+                for t in range(T):
+                    n = alpha[:, t, :, None] * n + beta[:, t, :, None] * k[:, t]
+                    n_list.append(n)
+                n_stack = torch.stack(n_list, dim=1)  # [B, T, H, d_k]
 
             # [STEP-05] Normalize: out = (q @ S) / max(||n||_inf, 1)
             n_inf  = n_stack.abs().max(dim=-1)[0]                # [B, T, H]
@@ -264,10 +270,13 @@ class CrossLayerStateFusion(nn.Module):
         # Bug 1 Fix: Initialize fusion_gate to -4.0 so sigmoid(-4) ≈ 0.018 (starts close to 0)
         self.fusion_gate = nn.Parameter(torch.full((config.n_layers, config.n_heads), -4.0))
 
-    def fuse(self, S_current, S_prev_layer, layer_idx):
+    def fuse(self, current_ns, prev_layer_ns, layer_idx):
         gate = torch.sigmoid(self.fusion_gate[layer_idx])  # [H]
         gate = gate[None, :, None, None]                   # broadcast to [1, H, 1, 1]
-        return S_current + gate * S_prev_layer             # additive state highway
+        S_current, n_current = current_ns
+        S_prev, _ = prev_layer_ns
+        S_fused = S_current + gate * S_prev                # additive state highway
+        return (S_fused, n_current)
 
 class HGDMUltimate(nn.Module):
     def __init__(self, config: HGDMConfig, force_sequential=False):
@@ -276,9 +285,12 @@ class HGDMUltimate(nn.Module):
         self.embedding = nn.Embedding(config.vocab_size, config.d_model)
         
         # Bug 2 Fix: Configure positional embedding size from configuration to save VRAM
-        self.pos_embedding = nn.Parameter(
-            torch.randn(1, config.max_position_embeddings, config.d_model) * 0.02
-        )
+        if getattr(config, "use_rope", False):
+            self.pos_embedding = None
+        else:
+            self.pos_embedding = nn.Parameter(
+                torch.randn(1, config.max_position_embeddings, config.d_model) * 0.02
+            )
         
         self.layers = nn.ModuleList([
             HGDMLayer(config, i, force_sequential=force_sequential) for i in range(config.n_layers)
@@ -301,12 +313,13 @@ class HGDMUltimate(nn.Module):
         boundary_mask = (byte_seq == 46) | (byte_seq == 63) | (byte_seq == 33) | (byte_seq == 10)
         
         # Bug 2 Wrap-around check: Allow arbitrary token offsets during generation without out-of-bounds errors
-        pos_offset = offset % self.pos_embedding.shape[1]
-        if pos_offset + T > self.pos_embedding.shape[1]:
-            indices = torch.arange(offset, offset + T, device=byte_seq.device) % self.pos_embedding.shape[1]
-            x = x + self.pos_embedding[:, indices, :]
-        else:
-            x = x + self.pos_embedding[:, pos_offset : pos_offset + T, :]
+        if self.pos_embedding is not None:
+            pos_offset = offset % self.pos_embedding.shape[1]
+            if pos_offset + T > self.pos_embedding.shape[1]:
+                indices = torch.arange(offset, offset + T, device=byte_seq.device) % self.pos_embedding.shape[1]
+                x = x + self.pos_embedding[:, indices, :]
+            else:
+                x = x + self.pos_embedding[:, pos_offset : pos_offset + T, :]
         
         if states is None: states = [None] * len(self.layers)
         next_states = []
@@ -330,6 +343,8 @@ class HGDMUltimate(nn.Module):
 
     @torch.no_grad()
     def generate(self, prompt_bytes, max_new_bytes=100, temp=0.8):
+        if max_new_bytes == 0:
+            return prompt_bytes
         self.eval()
         generated = prompt_bytes
         logits, states = self.forward(prompt_bytes)
