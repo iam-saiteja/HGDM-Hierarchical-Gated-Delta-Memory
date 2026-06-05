@@ -35,7 +35,7 @@ class CausalBroadcaster(nn.Module):
         self.proj = nn.Linear(config.d_model, config.d_byte, bias=False)
 
     def forward(self, z_semantic, T_original):
-        B, N, _ = z_semantic.shape
+        # N is number of semantic chunks, unused in this layer but kept for clarity
         zeros = torch.zeros_like(z_semantic[:, :1, :])
         # N+1 chunks to cover the remaining T % W bytes
         z_shifted = torch.cat([zeros, z_semantic], dim=1) 
@@ -254,7 +254,6 @@ class OmegaGDM(nn.Module):
                 next_states[2].append(ns)
 
             next_states[4] = {
-                'byte_pos': T % self.W,
                 'z_broadcast_cache': z_broadcast_cache,
                 'prev_renderer_last_S': raw_ren_ns,
                 'x_dec_last': x_dec[:, -1, :].detach()
@@ -346,10 +345,18 @@ class OmegaGDM(nn.Module):
                     prev_raw_ns = raw_ns
                     
                     # Selective update for batched heterogeneous triggering
-                    old_S, old_n = states[1][i]
+                    # FIX: Guard against None states on cold-start streaming
+                    if states[1][i] is not None:
+                        old_S, old_n = states[1][i]
+                    else:
+                        old_S, old_n = None, None
+                    
                     new_S, new_n = ns
-                    final_S = torch.where(trigger_mask_S, new_S, old_S)
-                    final_n = torch.where(trigger_mask_n, new_n, old_n)
+                    if old_S is not None and old_n is not None:
+                        final_S = torch.where(trigger_mask_S, new_S, old_S)
+                        final_n = torch.where(trigger_mask_n, new_n, old_n)
+                    else:
+                        final_S, final_n = new_S, new_n
                     next_states[1].append((final_S, final_n))
 
                 S_core_last = raw_ns
@@ -358,10 +365,17 @@ class OmegaGDM(nn.Module):
                 
                 # Update TD highway (layer 0 renderer state)
                 new_render_S0 = self._apply_td_highway(S_core_last, next_states[2][0], x_semantic[:, 0, :])
-                old_render_S0_S, old_render_S0_n = next_states[2][0]
+                # FIX: Guard against None states on cold-start streaming
+                if next_states[2][0] is not None:
+                    old_render_S0_S, old_render_S0_n = next_states[2][0]
+                else:
+                    old_render_S0_S, old_render_S0_n = None, None
                 new_render_S0_S, new_render_S0_n = new_render_S0
-                final_render_S0_S = torch.where(trigger_mask_S, new_render_S0_S, old_render_S0_S)
-                final_render_S0_n = torch.where(trigger_mask_n, new_render_S0_n, old_render_S0_n)
+                if old_render_S0_S is not None and old_render_S0_n is not None:
+                    final_render_S0_S = torch.where(trigger_mask_S, new_render_S0_S, old_render_S0_S)
+                    final_render_S0_n = torch.where(trigger_mask_n, new_render_S0_n, old_render_S0_n)
+                else:
+                    final_render_S0_S, final_render_S0_n = new_render_S0_S, new_render_S0_n
                 next_states[2][0] = (final_render_S0_S, final_render_S0_n)
             else:
                 next_states[1] = list(states[1])
@@ -405,7 +419,6 @@ class OmegaGDM(nn.Module):
 
 def latent_think(model, states, n_thoughts=8, temp=0.3, offset=0):
     device = next(model.parameters()).device
-    dtype = next(model.parameters()).dtype
     if states is not None and states[0] is not None and len(states[0]) > 0:
         B = states[0][0][0].shape[0] if isinstance(states[0][0], tuple) else states[0][0].shape[0]
     else:
@@ -427,6 +440,8 @@ def latent_think(model, states, n_thoughts=8, temp=0.3, offset=0):
             return_latent=True
         )
         logit = logits[:, -1, :] / temp
+        # FIX: Support batched inference - torch.argmax returns per-sample token
+        # Always returns list of token ids (one per batch element)
         char_idx = torch.argmax(logit, dim=-1).cpu().tolist()
         thought_tokens.append(char_idx)
         offset += 1
@@ -436,14 +451,39 @@ def latent_think(model, states, n_thoughts=8, temp=0.3, offset=0):
 def think_to_english(model, states, max_bytes=200):
     # Runs latent_think to project latent thought tokens and decode them to ASCII
     _, thought_tokens = latent_think(model, states, n_thoughts=max_bytes)
-    chars = []
-    for token in thought_tokens:
-        if 32 <= token <= 126:
-            chars.append(chr(token))
-        elif token == 10:
-            chars.append('\n')
-        elif token == 13:
-            chars.append('\r')
+    
+    # FIX: Handle batched tokens from latent_think
+    # thought_tokens is list of steps, each step is list of B token ids
+    # For simplicity, assume B=1 (single batch element) or take first batch element
+    if not thought_tokens:
+        return ""
+    
+    # Handle both scalar tokens (B=1) and batched (B>1)
+    batch_size = len(thought_tokens[0]) if isinstance(thought_tokens[0], list) else 1
+    
+    chars_per_batch = [[] for _ in range(batch_size)]
+    for step_tokens in thought_tokens:
+        if isinstance(step_tokens, list):
+            for b, token in enumerate(step_tokens):
+                if 32 <= token <= 126:
+                    chars_per_batch[b].append(chr(token))
+                elif token == 10:
+                    chars_per_batch[b].append('\n')
+                elif token == 13:
+                    chars_per_batch[b].append('\r')
+                else:
+                    chars_per_batch[b].append('.')
         else:
-            chars.append('.')
-    return "".join(chars)
+            # Scalar fallback (shouldn't happen with new batched latent_think)
+            token = step_tokens
+            if 32 <= token <= 126:
+                chars_per_batch[0].append(chr(token))
+            elif token == 10:
+                chars_per_batch[0].append('\n')
+            elif token == 13:
+                chars_per_batch[0].append('\r')
+            else:
+                chars_per_batch[0].append('.')
+    
+    # Return concatenated thoughts (first batch element if B>1)
+    return "".join(chars_per_batch[0])
