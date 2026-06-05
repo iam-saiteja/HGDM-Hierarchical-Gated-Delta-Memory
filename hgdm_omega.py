@@ -370,11 +370,11 @@ class OmegaGDM(nn.Module):
         if max_new_bytes == 0:
             return prompt_bytes
         self.eval()
-        generated = prompt_bytes
+        generated = [prompt_bytes]
         logits, states = self.forward(prompt_bytes)
         next_logit = logits[:, -1, :] / temp
         next_byte = torch.multinomial(F.softmax(next_logit, dim=-1), num_samples=1)
-        generated = torch.cat([generated, next_byte], dim=1)
+        generated.append(next_byte)
 
         offset = prompt_bytes.shape[1]
         for _ in range(max_new_bytes - 1):
@@ -384,9 +384,9 @@ class OmegaGDM(nn.Module):
             logits, states = self.forward(next_byte, states, offset=offset)
             next_logit = logits[:, -1, :] / temp
             next_byte = torch.multinomial(F.softmax(next_logit, dim=-1), num_samples=1)
-            generated = torch.cat([generated, next_byte], dim=1)
+            generated.append(next_byte)
             offset += 1
-        return generated
+        return torch.cat(generated, dim=1)
 
 def latent_think(model, states, n_thoughts=8, temp=0.3, offset=0):
     device = next(model.parameters()).device

@@ -346,12 +346,12 @@ class HGDMUltimate(nn.Module):
         if max_new_bytes == 0:
             return prompt_bytes
         self.eval()
-        generated = prompt_bytes
+        generated = [prompt_bytes]
         logits, states = self.forward(prompt_bytes)
         next_logit = logits[:, -1, :] / temp
         next_probs = F.softmax(next_logit, dim=-1)
         next_byte = torch.multinomial(next_probs, num_samples=1)
-        generated = torch.cat([generated, next_byte], dim=1)
+        generated.append(next_byte)
         
         offset = prompt_bytes.shape[1]
         for _ in range(max_new_bytes - 1):
@@ -360,6 +360,6 @@ class HGDMUltimate(nn.Module):
             next_logit = logits[:, -1, :] / temp
             next_probs = F.softmax(next_logit, dim=-1)
             next_byte = torch.multinomial(next_probs, num_samples=1)
-            generated = torch.cat([generated, next_byte], dim=1)
+            generated.append(next_byte)
             offset += 1
-        return generated
+        return torch.cat(generated, dim=1)
