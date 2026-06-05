@@ -48,9 +48,8 @@ class CausalBroadcaster(nn.Module):
         self.proj = nn.Linear(config.d_model, config.d_byte, bias=False)
 
     def forward(self, z_semantic, T_original):
-        # N is number of semantic chunks, unused in this layer but kept for clarity
         zeros = torch.zeros_like(z_semantic[:, :1, :])
-        # N+1 chunks to cover the remaining T % W bytes
+        # Shift by one chunk so each byte only sees prior semantic context.
         z_shifted = torch.cat([zeros, z_semantic], dim=1) 
         z_proj = self.proj(z_shifted)                  
         z_broadcast = z_proj.repeat_interleave(self.W, dim=1)  
@@ -135,6 +134,39 @@ class OmegaGDM(nn.Module):
         for head in self.mtp_heads:
             head.weight = self.embedding.weight
 
+    def _decimation_step(self, cum_prob, byte_pos, boundary_prob):
+        new_cum_prob = cum_prob + boundary_prob
+        new_byte_pos = byte_pos + 1
+        threshold_trigger = new_cum_prob >= 1.0
+        window_trigger = new_byte_pos >= self.W
+        trigger_mask = threshold_trigger | window_trigger
+        final_cum_prob = torch.where(
+            trigger_mask,
+            torch.where(threshold_trigger, new_cum_prob - 1.0, torch.zeros_like(new_cum_prob)),
+            new_cum_prob,
+        )
+        final_byte_pos = torch.where(trigger_mask, torch.zeros_like(new_byte_pos), new_byte_pos)
+        return trigger_mask, final_cum_prob, final_byte_pos
+
+    def _online_decimation_events(self, boundary_prob, states, B, device):
+        buf = states[4] if states is not None else None
+        if buf is not None and 'cum_prob' in buf:
+            cum_prob = buf['cum_prob'].to(device=device, dtype=boundary_prob.dtype)
+        else:
+            cum_prob = torch.zeros(B, device=device, dtype=boundary_prob.dtype)
+
+        if buf is not None and 'byte_pos' in buf:
+            byte_pos = buf['byte_pos'].to(device=device, dtype=torch.long)
+        else:
+            byte_pos = torch.zeros(B, device=device, dtype=torch.long)
+
+        events = []
+        for t in range(boundary_prob.shape[1]):
+            trigger_mask, cum_prob, byte_pos = self._decimation_step(cum_prob, byte_pos, boundary_prob[:, t])
+            events.append(trigger_mask)
+
+        return torch.stack(events, dim=1), cum_prob, byte_pos
+
     def _apply_td_highway(self, S_core_last, renderer_state_0, x_core=None):
         # [STEP-05] State is now (S, n) tuple — extract S matrix for highway projection
         S_core = S_core_last[0] if isinstance(S_core_last, tuple) else S_core_last
@@ -181,7 +213,7 @@ class OmegaGDM(nn.Module):
         new_S = gate * S_proj if core_S is None else core_S + gate * S_proj
         return (new_S, core_n)  # return (S, n) tuple to keep state format consistent
 
-    def forward(self, byte_seq=None, states=None, offset=0, return_mtp=False, x_embed=None, return_latent=False):
+    def forward(self, byte_seq=None, states=None, offset=0, return_mtp=False, x_embed=None, return_latent=False, return_boundary_loss=False, return_states=True):
         if byte_seq is not None:
             B, T = byte_seq.shape
             x_byte = self.embedding(byte_seq)
@@ -205,29 +237,40 @@ class OmegaGDM(nn.Module):
 
             # BUG 1 FIX: Only slice completed windows, no F.pad poisoning
             N = T // self.W
+            final_cum_prob = None
+            final_byte_pos = None
+            b_loss = None
             if N > 0:
                 # [STEP-12] Content-Aware Decimation
                 boundary_logit = self.boundary_head(x_byte) # [B, T, 1]
                 boundary_prob = torch.sigmoid(boundary_logit).squeeze(-1) # [B, T]
-                
-                cum_probs = torch.cumsum(boundary_prob, dim=-1)
-                floors = torch.floor(cum_probs)
-                crossings = torch.zeros_like(boundary_prob, dtype=torch.bool)
-                crossings[:, 1:] = floors[:, 1:] > floors[:, :-1]
-                crossings[:, 0] = floors[:, 0] >= 1.0
-                
+
+                decimation_events, final_cum_prob, final_byte_pos = self._online_decimation_events(
+                    boundary_prob, states, B, x_byte.device
+                )
+
                 # FULL-SEQUENCE DECIMATION POLICY:
-                # Fully vectorized top-k selection prioritizes triggered crossings, then highest probabilities.
-                # This is used in training/full-pass inference where we control exactly which positions
-                # become semantic tokens. Crossings (integer threshold crossings) are weighted 10x more
-                # than raw boundary probability to prioritize content-aware boundaries.
-                score = boundary_prob + crossings.float() * 10.0
+                # Match streaming's online cumulative trigger rule and keep the fixed training
+                # budget by taking the first N completed semantic events.
+                positions = torch.arange(T, device=x_byte.device).unsqueeze(0).expand(B, -1)
+                score = torch.where(
+                    decimation_events,
+                    (T - positions).to(boundary_prob.dtype),
+                    torch.full_like(boundary_prob, -1.0),
+                )
                 _, top_idx = torch.topk(score, k=N, dim=-1)
+                selected_valid = torch.gather(decimation_events, 1, top_idx)
+                fallback_indices = torch.arange(N, device=x_byte.device).unsqueeze(0).expand(B, -1)
+                fallback_indices = ((fallback_indices + 1) * self.W - 1).clamp_max(T - 1)
+                top_idx = torch.where(selected_valid, top_idx, fallback_indices)
                 selected_indices, _ = torch.sort(top_idx, dim=-1) # [B, N]
-                
+
                 boundary_prob_selected = torch.gather(boundary_prob, 1, selected_indices) # [B, N]
                 x_semantic_in = torch.gather(x_dec, 1, selected_indices.unsqueeze(-1).expand(-1, -1, x_dec.shape[-1]))
                 x_semantic_in = x_semantic_in * boundary_prob_selected.unsqueeze(-1)
+
+                if return_boundary_loss:
+                    b_loss = (boundary_prob * (1.0 - boundary_prob)).mean()
                 x_semantic_in = self.decimator_proj(self.decimator_norm(x_semantic_in))
 
                 semantic_offset = offset // self.W
@@ -270,11 +313,22 @@ class OmegaGDM(nn.Module):
                 raw_ren_ns = ns
                 next_states[2].append(ns)
 
-            next_states[4] = {
-                'z_broadcast_cache': z_broadcast_cache,
-                'prev_renderer_last_S': raw_ren_ns,
-                'x_dec_last': x_dec[:, -1, :].detach()
-            }
+            if return_states:
+                next_states[4] = {
+                    'z_broadcast_cache': z_broadcast_cache,
+                    'prev_renderer_last_S': raw_ren_ns,
+                    'x_dec_last': x_dec[:, -1, :].detach(),
+                    'cum_prob': final_cum_prob if final_cum_prob is not None else (
+                        states[4]['cum_prob'] if states[4] is not None and 'cum_prob' in states[4]
+                        else torch.zeros(B, device=x_byte.device, dtype=x_byte.dtype)
+                    ),
+                    'byte_pos': final_byte_pos if final_byte_pos is not None else (
+                        states[4]['byte_pos'] if states[4] is not None and 'byte_pos' in states[4]
+                        else torch.zeros(B, device=x_byte.device, dtype=torch.long)
+                    )
+                }
+            else:
+                next_states = None
 
             x_out = self.norm_f(x_render)
             logits1 = self.fc_out(x_out)
@@ -284,10 +338,16 @@ class OmegaGDM(nn.Module):
             else:
                 out_logits = logits1
                 
-            if return_latent:
-                return out_logits, next_states, x_out
+            if return_boundary_loss:
+                if return_latent:
+                    return out_logits, next_states, x_out, b_loss
+                else:
+                    return out_logits, next_states, b_loss
             else:
-                return out_logits, next_states
+                if return_latent:
+                    return out_logits, next_states, x_out
+                else:
+                    return out_logits, next_states
 
         else:
             for i, layer in enumerate(self.byte_catcher):
@@ -301,17 +361,21 @@ class OmegaGDM(nn.Module):
             if buf is None:
                 buf = {
                     'cum_prob': torch.zeros(B, device=x_byte.device), 
+                    'byte_pos': torch.zeros(B, device=x_byte.device, dtype=torch.long),
                     'z_broadcast_cache': torch.zeros(B, self.config.d_byte, device=x_byte.device, dtype=x_byte.dtype), 
                     'prev_renderer_last_S': None
                 }
-            elif 'cum_prob' not in buf:
+            elif 'cum_prob' not in buf or 'byte_pos' not in buf:
                 buf = {
-                    'cum_prob': torch.zeros(B, device=x_byte.device),
+                    'cum_prob': buf.get('cum_prob', torch.zeros(B, device=x_byte.device)),
+                    'byte_pos': buf.get('byte_pos', torch.zeros(B, device=x_byte.device, dtype=torch.long)),
                     'z_broadcast_cache': buf['z_broadcast_cache'],
-                    'prev_renderer_last_S': buf['prev_renderer_last_S']
+                    'prev_renderer_last_S': buf['prev_renderer_last_S'],
+                    'x_dec_last': buf.get('x_dec_last')
                 }
 
             cum_prob = buf['cum_prob']
+            byte_pos = buf['byte_pos']
             z_bc = buf['z_broadcast_cache']
             x_render = x_byte + z_bc.unsqueeze(1)
 
@@ -323,37 +387,28 @@ class OmegaGDM(nn.Module):
                 next_states[2].append(ns)
 
             # STREAMING DECIMATION POLICY:
-            # In streaming inference (T==1), we use per-sample cumulative threshold triggering.
-            # When cumulative boundary probability crosses an integer (1.0, 2.0, etc.), we create
-            # a new semantic token. This is the online equivalent of the full-sequence top-k policy.
-            # Note: This produces slightly different decimation boundaries than training (top-k on
-            # full sequence). To exactly match training behavior, use full-sequence forward pass.
+            # Per-sample online trigger shared with full-sequence training: emit when cumulative
+            # boundary probability crosses 1.0, or when a decimation window completes.
             boundary_logit = self.boundary_head(x_byte) # [B, 1, 1]
             boundary_prob = torch.sigmoid(boundary_logit).squeeze(-1).squeeze(-1) # [B]
-            
-            new_cum_prob = cum_prob + boundary_prob
-            trigger_mask = new_cum_prob >= 1.0
-            
-            final_cum_prob = torch.where(trigger_mask, new_cum_prob - 1.0, new_cum_prob)
+            trigger_mask, final_cum_prob, final_byte_pos = self._decimation_step(cum_prob, byte_pos, boundary_prob)
 
             new_buf = {
                 'cum_prob': final_cum_prob,
+                'byte_pos': final_byte_pos,
                 'z_broadcast_cache': z_bc,
                 'prev_renderer_last_S': raw_ren_ns,
                 'x_dec_last': x_dec_step.squeeze(1).detach()
             }
 
             if trigger_mask.any().item():
-                # OPTIMIZATION: Compact-trigger semantic core to run only on triggered rows
-                # This reduces computation by ~10-20% for sparse decimation patterns
+                # Compact-trigger semantic core: run only on rows that emitted a token.
                 
                 x_sem_chunk = self.decimator_proj(self.decimator_norm(x_dec_step))
                 x_sem_chunk = x_sem_chunk * boundary_prob.unsqueeze(1).unsqueeze(2)
                 
-                # Extract indices of triggered samples [num_triggered]
-                triggered_indices = torch.nonzero(trigger_mask, as_tuple=True)[0]  # [num_triggered]
-                num_triggered = triggered_indices.shape[0]
-                
+                # Extract indices of triggered samples.
+                triggered_indices = torch.nonzero(trigger_mask, as_tuple=True)[0]
                 # [STEP-11] Absolute positional embedding removed (RoPE is applied inside the core's MultiHeadGatedDelta instead)
                 chunk_idx = offset // self.W 
                 
@@ -424,18 +479,22 @@ class OmegaGDM(nn.Module):
                 new_buf['z_broadcast_cache'] = z_bc_full
                 
                 # Update TD highway (layer 0 renderer state) for triggered samples only
-                new_render_S0 = self._apply_td_highway(S_core_last, next_states[2][0], x_semantic[:, 0, :])
-                # FIX: Guard against None states on cold-start streaming
                 if next_states[2][0] is not None:
-                    old_render_S0_S, old_render_S0_n = next_states[2][0]
+                    old_render_S0_S, old_render_S0_n = next_states[2][0][0][triggered_indices], next_states[2][0][1][triggered_indices]
                 else:
                     old_render_S0_S, old_render_S0_n = None, None
                 
+                new_render_S0 = self._apply_td_highway(
+                    S_core_last,
+                    (old_render_S0_S, old_render_S0_n) if old_render_S0_S is not None else None,
+                    x_semantic[:, 0, :]
+                )
                 new_render_S0_S, new_render_S0_n = new_render_S0
-                if old_render_S0_S is not None and old_render_S0_n is not None:
+
+                if next_states[2][0] is not None:
                     # Scatter triggered samples back to full batch
-                    final_render_S0_S = old_render_S0_S.clone()
-                    final_render_S0_n = old_render_S0_n.clone()
+                    final_render_S0_S = next_states[2][0][0].clone()
+                    final_render_S0_n = next_states[2][0][1].clone()
                     final_render_S0_S[triggered_indices] = new_render_S0_S
                     final_render_S0_n[triggered_indices] = new_render_S0_n
                 else:
@@ -487,10 +546,18 @@ class OmegaGDM(nn.Module):
 
 def latent_think(model, states, n_thoughts=8, temp=0.3, offset=0):
     device = next(model.parameters()).device
-    if states is not None and states[0] is not None and len(states[0]) > 0:
-        B = states[0][0][0].shape[0] if isinstance(states[0][0], tuple) else states[0][0].shape[0]
-    else:
-        B = 1
+    B = 1
+    if states is not None:
+        for state_group in states[:3]:
+            if state_group is None:
+                continue
+            for state in state_group:
+                if state is None:
+                    continue
+                B = state[0].shape[0] if isinstance(state, tuple) else state.shape[0]
+                break
+            if B != 1:
+                break
     
     # Initialize thinking using embedding of a dummy zero byte
     x_byte = model.embedding(torch.zeros(B, 1, dtype=torch.long, device=device))
@@ -520,9 +587,6 @@ def think_to_english(model, states, max_bytes=200):
     # Runs latent_think to project latent thought tokens and decode them to ASCII
     _, thought_tokens = latent_think(model, states, n_thoughts=max_bytes)
     
-    # FIX: Handle batched tokens from latent_think
-    # thought_tokens is list of steps, each step is list of B token ids
-    # For simplicity, assume B=1 (single batch element) or take first batch element
     if not thought_tokens:
         return ""
     
@@ -553,5 +617,5 @@ def think_to_english(model, states, max_bytes=200):
             else:
                 chars_per_batch[0].append('.')
     
-    # Return concatenated thoughts (first batch element if B>1)
-    return "".join(chars_per_batch[0])
+    decoded = ["".join(chars) for chars in chars_per_batch]
+    return decoded[0] if batch_size == 1 else decoded
