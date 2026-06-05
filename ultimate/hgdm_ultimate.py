@@ -210,10 +210,12 @@ class MultiHeadGatedDelta(nn.Module):
         else:
             S_prev, n_prev = None, None
 
-        if not self.force_sequential and fused_nitro_scan is not None and q.is_cuda:
+        use_epistemic_gate = getattr(self.config, "use_epistemic_gate", True)
+        has_fast_kernel = (fused_nitro_scan_with_n is not None) if use_epistemic_gate else (fused_nitro_scan is not None)
+
+        if not self.force_sequential and has_fast_kernel and q.is_cuda:
             # FAST PATH: Triton kernel handles the expensive S recurrence
             n_grad_mode = getattr(self.config, "n_grad_mode", "detached")
-            use_epistemic_gate = getattr(self.config, "use_epistemic_gate", True)
             
             if n_grad_mode not in ("detached", "exact"):
                 raise ValueError(f"Unsupported n_grad_mode={n_grad_mode!r}; expected 'detached' or 'exact'")
