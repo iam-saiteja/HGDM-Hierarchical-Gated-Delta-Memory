@@ -58,7 +58,7 @@ def load_model(device, checkpoint_path="hgdm_1b_latest.pt"):
         sys.exit(1)
 
     print(f"[System] Loading checkpoint from {checkpoint_path}...")
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     model.load_state_dict(checkpoint['model_state_dict'])
     step = checkpoint.get('step', '?')
     tokens = checkpoint.get('tokens_trained', '?')

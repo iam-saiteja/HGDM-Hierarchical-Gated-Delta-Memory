@@ -16,8 +16,8 @@ from hgdm_ultimate import HGDMUltimate, HGDMConfig
 # =============================================================================
 def get_gpu_stats():
     try:
-        cmd = "nvidia-smi --query-gpu=temperature.gpu,memory.used,utilization.gpu --format=csv,noheader,nounits"
-        output = subprocess.check_output(cmd, shell=True).decode().strip()
+        cmd = ["nvidia-smi", "--query-gpu=temperature.gpu,memory.used,utilization.gpu", "--format=csv,noheader,nounits"]
+        output = subprocess.check_output(cmd).decode().strip()
         temp, mem, util = output.split(',')
         return f"{temp.strip()}C | {mem.strip()}MB | {util.strip()}% Util"
     except:

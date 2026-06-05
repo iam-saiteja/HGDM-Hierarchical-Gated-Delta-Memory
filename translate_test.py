@@ -20,7 +20,7 @@ def main():
         sys.exit(1)
 
     print(f"[System] Loading checkpoint from '{args.ckpt}'...")
-    checkpoint = torch.load(args.ckpt, map_location=device, weights_only=False)
+    checkpoint = torch.load(args.ckpt, map_location=device, weights_only=True)
     
     # Load configuration dynamically from checkpoint if saved, else use default 39.5M config
     if 'config' in checkpoint:
