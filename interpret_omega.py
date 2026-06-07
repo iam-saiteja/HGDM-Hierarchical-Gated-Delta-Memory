@@ -247,11 +247,16 @@ def build_omega_model(ckpt_path: Optional[str], device: torch.device) -> OmegaGD
     )
     
     if ckpt_path:
-        sd = torch.load(ckpt_path, map_location=device)
+        checkpoint_obj = torch.load(ckpt_path, map_location=device)
+        if isinstance(checkpoint_obj, dict) and 'config' in checkpoint_obj:
+            cfg = checkpoint_obj['config']
+            print(f"[Probe] Loaded model config directly from checkpoint.")
+        
+        sd = checkpoint_obj
         if isinstance(sd, dict) and 'model_state_dict' in sd:
             sd = sd['model_state_dict']
         
-        # Dynamically auto-detect model configuration sizes from loaded state dict keys
+        # Dynamically auto-detect model configuration sizes from loaded state dict keys as a fallback/verification
         try:
             if 'decimator_proj.weight' in sd:
                 cfg.d_model = sd['decimator_proj.weight'].shape[0]

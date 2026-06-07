@@ -66,6 +66,8 @@ class OmegaGDM(nn.Module):
         self.W = config.decimation_rate
 
         self.embedding = nn.Embedding(config.vocab_size, config.d_byte)
+        with torch.no_grad():
+            self.embedding.weight.normal_(mean=0.0, std=config.d_byte ** -0.5)
 
         catcher_cfg = HGDMConfig(d_model=config.d_byte, n_layers=config.catcher_layers, n_heads=4, d_k=32, d_v=32, d_ff=config.d_byte * 4, use_variable_delta_t=config.use_variable_delta_t)
         self.byte_catcher = nn.ModuleList([HGDMLayer(catcher_cfg, i, force_sequential) for i in range(config.catcher_layers)])
