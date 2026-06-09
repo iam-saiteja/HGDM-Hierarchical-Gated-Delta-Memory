@@ -186,54 +186,16 @@ class OmegaGDM(nn.Module):
         return self.td_gate_net.bias
 
     def _apply_td_highway(self, S_core_last, renderer_state_0, x_core=None):
-        # [STEP-05] State is now (S, n) tuple — extract S matrix for highway projection
-        S_core = S_core_last[0] if isinstance(S_core_last, tuple) else S_core_last
+        # Permanently bypassed to maintain strict causality and eliminate parallel-sequential mismatch
         ren_S  = renderer_state_0[0] if isinstance(renderer_state_0, tuple) else renderer_state_0
         ren_n  = renderer_state_0[1] if isinstance(renderer_state_0, tuple) else None
-        
-        if S_core is None:
-            return (ren_S, ren_n)
-            
-        B = S_core.shape[0]
-        # Pool/project across heads to preserve head-specific structure
-        S_pooled = torch.einsum('bhkd,hr->brkd', S_core, self.td_head_pool)
-        H_ren = self._ren_hw_shape[0]
-        S_norm = self.highway_td_norm(S_pooled.reshape(B, H_ren, -1)).reshape(B, H_ren, self._core_hw_shape[1], self._core_hw_shape[2])
-        S_proj = self.highway_td_proj_k(S_norm.transpose(-1, -2)).transpose(-1, -2)
-        S_proj = self.highway_td_proj_v(S_proj)
-        
-        if x_core is not None:
-            gate = torch.sigmoid(self.td_gate_net(x_core))[:, :, None, None]
-        else:
-            gate = torch.sigmoid(self.td_gate_net.bias)[None, :, None, None]
-            
-        new_S = gate * S_proj if ren_S is None else ren_S + gate * S_proj
-        return (new_S, ren_n)  # return (S, n) tuple to keep state format consistent
+        return (ren_S, ren_n)
 
     def _apply_bu_highway(self, S_renderer_last, core_state_0, x_dec_last=None):
-        # [STEP-05] State is now (S, n) tuple — extract S matrix for highway projection
-        S_ren  = S_renderer_last[0] if isinstance(S_renderer_last, tuple) else S_renderer_last
+        # Permanently bypassed to maintain strict causality and eliminate parallel-sequential mismatch
         core_S = core_state_0[0] if isinstance(core_state_0, tuple) else core_state_0
         core_n = core_state_0[1] if isinstance(core_state_0, tuple) else None
-        
-        if S_ren is None:
-            return (core_S, core_n)
-            
-        B = S_ren.shape[0]
-        # Pool/project across heads to preserve head-specific structure
-        S_pooled = torch.einsum('bhkd,hc->bckd', S_ren, self.bu_head_pool)
-        H_core = self._core_hw_shape[0]
-        S_norm = self.highway_bu_norm(S_pooled.reshape(B, H_core, -1)).reshape(B, H_core, self._ren_hw_shape[1], self._ren_hw_shape[2])
-        S_proj = self.highway_bu_proj_k(S_norm.transpose(-1, -2)).transpose(-1, -2)
-        S_proj = self.highway_bu_proj_v(S_proj)
-        
-        if x_dec_last is not None:
-            gate = torch.sigmoid(self.bu_gate_net(x_dec_last))[:, :, None, None]
-        else:
-            gate = torch.sigmoid(self.bu_gate_net.bias)[None, :, None, None]
-            
-        new_S = gate * S_proj if core_S is None else core_S + gate * S_proj
-        return (new_S, core_n)  # return (S, n) tuple to keep state format consistent
+        return (core_S, core_n)
 
     def forward(self, byte_seq=None, states=None, offset=0, return_mtp=False, x_embed=None, return_latent=False, return_boundary_loss=False, return_states=True):
         if byte_seq is not None:
@@ -251,10 +213,10 @@ class OmegaGDM(nn.Module):
 
         if T > 1:
             for i, layer in enumerate(self.byte_catcher):
-                x_byte, ns = layer(x_byte, states[0][i])
+                x_byte, ns = layer(x_byte, states[0][i], offset=offset)
                 next_states[0].append(ns)
 
-            x_dec, dec_ns = self.decimator_layer(x_byte, states[3])
+            x_dec, dec_ns = self.decimator_layer(x_byte, states[3], offset=offset)
             next_states[3] = dec_ns
 
             # BUG 1 FIX: Only slice completed windows, no F.pad poisoning
@@ -289,11 +251,10 @@ class OmegaGDM(nn.Module):
 
                 boundary_prob_selected = torch.gather(boundary_prob, 1, selected_indices) # [B, N]
                 x_semantic_in = torch.gather(x_dec, 1, selected_indices.unsqueeze(-1).expand(-1, -1, x_dec.shape[-1]))
-                x_semantic_in = x_semantic_in * boundary_prob_selected.unsqueeze(-1)
-
                 if return_boundary_loss:
                     b_loss = (boundary_prob * (1.0 - boundary_prob)).mean()
                 x_semantic_in = self.decimator_proj(self.decimator_norm(x_semantic_in))
+                x_semantic_in = x_semantic_in * boundary_prob_selected.unsqueeze(-1)
 
                 semantic_offset = offset // self.W
                 # [STEP-11] Absolute positional embedding removed (RoPE is applied inside the core's MultiHeadGatedDelta instead)
@@ -331,7 +292,7 @@ class OmegaGDM(nn.Module):
 
             raw_ren_ns = None
             for i, layer in enumerate(self.byte_renderer):
-                x_render, ns = layer(x_render, renderer_states_in[i])
+                x_render, ns = layer(x_render, renderer_states_in[i], offset=offset)
                 raw_ren_ns = ns
                 next_states[2].append(ns)
 
@@ -373,10 +334,10 @@ class OmegaGDM(nn.Module):
 
         else:
             for i, layer in enumerate(self.byte_catcher):
-                x_byte, ns = layer(x_byte, states[0][i])
+                x_byte, ns = layer(x_byte, states[0][i], offset=offset)
                 next_states[0].append(ns)
 
-            x_dec_step, dec_ns = self.decimator_layer(x_byte, states[3])
+            x_dec_step, dec_ns = self.decimator_layer(x_byte, states[3], offset=offset)
             next_states[3] = dec_ns
 
             buf = states[4]
@@ -404,7 +365,7 @@ class OmegaGDM(nn.Module):
             renderer_states_in = list(states[2])
             raw_ren_ns = None
             for i, layer in enumerate(self.byte_renderer):
-                x_render, ns = layer(x_render, renderer_states_in[i])
+                x_render, ns = layer(x_render, renderer_states_in[i], offset=offset)
                 raw_ren_ns = ns
                 next_states[2].append(ns)
 

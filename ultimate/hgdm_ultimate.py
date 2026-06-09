@@ -197,7 +197,7 @@ class MultiHeadGatedDelta(nn.Module):
         # [STEP-08] Per-head write scale: each head has independent amplitude control
         beta      = beta * torch.exp(self.log_beta_scale)[None, None, :]
         # [STEP-09] Phase Oscillator: periodic gating on beta
-        pos = torch.arange(T, device=x.device, dtype=torch.float32)
+        pos = offset + torch.arange(T, device=x.device, dtype=torch.float32)
         T_cycle = torch.exp(self.log_T_cycle)
         clock_gate = 0.5 + 0.5 * torch.cos(2.0 * math.pi * pos[:, None] / T_cycle[None, :])
         beta      = beta * clock_gate[None, :, :].to(dtype=x.dtype)
