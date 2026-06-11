@@ -18,6 +18,7 @@ def train_sft():
     parser.add_argument("--grad-accum", type=int, default=8, help="Gradient accumulation steps")
     parser.add_argument("--lr", type=type(2e-4), default=2e-4, help="Peak learning rate for SFT")
     parser.add_argument("--block-size", type=int, default=2048, help="Sequence block length")
+    parser.add_argument("--base-ckpt", type=str, default="", help="Path to base pre-trained model (e.g., omega_100m_enwik8.pt)")
     parser.add_argument("--ckpt", type=str, default="omega_slm_sft_latest.pt", help="Checkpoint save path")
     args = parser.parse_args()
 
@@ -46,6 +47,18 @@ def train_sft():
     params = sum(p.numel() for p in model.parameters())
     print(f"[Model] Parameter Count: {params/1e6:.2f}M")
 
+    # Load base weights if starting fresh from a pre-trained model
+    if args.base_ckpt and not os.path.exists(args.ckpt):
+        if os.path.exists(args.base_ckpt):
+            print(f"[System] Loading base weights from {args.base_ckpt}...")
+            base_ckpt = torch.load(args.base_ckpt, map_location=device)
+            # Handle different checkpoint formats (model vs model_state_dict)
+            state_dict = base_ckpt.get('model_state_dict', base_ckpt.get('model', base_ckpt))
+            model.load_state_dict(state_dict)
+            print("[System] Base weights loaded successfully.")
+        else:
+            print(f"[WARNING] Base checkpoint {args.base_ckpt} not found! Starting from scratch.")
+
     # 2. Setup Data Loader
     print(f"[Dataset] Initializing SFT stream from: {args.dataset}")
     dataloader = get_sft_dataloader(
@@ -63,7 +76,7 @@ def train_sft():
 
     start_step = 0
     if os.path.exists(args.ckpt):
-        print(f"[System] Resuming from checkpoint {args.ckpt}")
+        print(f"[System] Resuming SFT training from checkpoint {args.ckpt}")
         ckpt = torch.load(args.ckpt, map_location=device)
         model.load_state_dict(ckpt['model'])
         opt.load_state_dict(ckpt['opt'])
