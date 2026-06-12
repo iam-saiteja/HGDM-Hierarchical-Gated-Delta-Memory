@@ -50,14 +50,14 @@ def get_omega_v1_dataloader(batch_size=4, block_size=2048):
                     {'role': 'assistant', 'content': random.choice(IDENTITY_RESPONSES)}
                 ]
             else:
-                if 'conversations' in row:
+                if 'conversations' in row and row['conversations'] is not None:
                     # OpenHermes format
                     for conv in row['conversations']:
                         role = "user" if conv['from'] == "human" else "assistant"
                         messages.append({'role': role, 'content': conv['value']})
-                elif 'question' in row and 'response' in row:
+                elif 'question' in row and row['question'] is not None and 'response' in row and row['response'] is not None:
                     # OpenOrca format
-                    if 'system_prompt' in row and row['system_prompt'].strip() != "":
+                    if 'system_prompt' in row and row['system_prompt'] is not None and row['system_prompt'].strip() != "":
                         messages.append({'role': 'system', 'content': row['system_prompt']})
                     messages.append({'role': 'user', 'content': row['question']})
                     messages.append({'role': 'assistant', 'content': row['response']})
