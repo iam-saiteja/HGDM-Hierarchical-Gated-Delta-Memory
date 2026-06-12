@@ -23,11 +23,18 @@ IDENTITY_RESPONSES = [
     "I am Omega Model Version 1, a 120-million parameter byte-level RNN designed by Saiteja.",
 ]
 
-def get_omega_v1_dataloader(dataset_name="teknium/OpenHermes-2.5", split="train", batch_size=4, block_size=2048):
+from datasets import load_dataset, interleave_datasets
+
+def get_omega_v1_dataloader(batch_size=4, block_size=2048):
     """
-    Streams OpenHermes-2.5, formats to ChatML, and randomly injects identity training data.
+    Streams OpenHermes-2.5 AND OpenOrca combined (~4.5M samples).
+    Formats to ChatML, and randomly injects identity training data.
     """
-    dataset = load_dataset(dataset_name, split=split, streaming=True)
+    hermes_ds = load_dataset("teknium/OpenHermes-2.5", split="train", streaming=True)
+    orca_ds = load_dataset("Open-Orca/OpenOrca", split="train", streaming=True)
+    
+    # Interleave to mix tasks dynamically
+    dataset = interleave_datasets([hermes_ds, orca_ds])
     
     def data_generator():
         x_batch = []
@@ -36,19 +43,26 @@ def get_omega_v1_dataloader(dataset_name="teknium/OpenHermes-2.5", split="train"
         for row in dataset:
             messages = []
             
-            # Identity Injection (2% chance to swap the sample with an identity QA)
+            # Identity Injection (2% chance)
             if random.random() < 0.02:
                 messages = [
                     {'role': 'user', 'content': random.choice(IDENTITY_PROMPTS)},
                     {'role': 'assistant', 'content': random.choice(IDENTITY_RESPONSES)}
                 ]
             else:
-                # OpenHermes format: row['conversations'] is a list of dicts {"from": "human"/"gpt", "value": "..."}
-                if 'conversations' not in row:
+                if 'conversations' in row:
+                    # OpenHermes format
+                    for conv in row['conversations']:
+                        role = "user" if conv['from'] == "human" else "assistant"
+                        messages.append({'role': role, 'content': conv['value']})
+                elif 'question' in row and 'response' in row:
+                    # OpenOrca format
+                    if 'system_prompt' in row and row['system_prompt'].strip() != "":
+                        messages.append({'role': 'system', 'content': row['system_prompt']})
+                    messages.append({'role': 'user', 'content': row['question']})
+                    messages.append({'role': 'assistant', 'content': row['response']})
+                else:
                     continue
-                for conv in row['conversations']:
-                    role = "user" if conv['from'] == "human" else "assistant"
-                    messages.append({'role': role, 'content': conv['value']})
                     
             x, y = format_chat_to_bytes_and_targets(messages, max_length=block_size)
             

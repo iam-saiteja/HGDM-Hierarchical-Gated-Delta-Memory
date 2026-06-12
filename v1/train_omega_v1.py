@@ -11,7 +11,7 @@ from v1.data_omega_v1 import get_omega_v1_dataloader
 
 def train_omega_v1():
     parser = argparse.ArgumentParser(description="Train Omega Model Version 1")
-    parser.add_argument("--steps", type=int, default=1000000, help="Total training steps (1M)")
+    parser.add_argument("--steps", type=int, default=150000, help="Total training steps for 1 epoch of 4.5M samples")
     parser.add_argument("--batch-size", type=int, default=4, help="Micro-batch size")
     parser.add_argument("--grad-accum", type=int, default=8, help="Gradient accumulation steps")
     parser.add_argument("--lr", type=type(3e-4), default=3e-4, help="Peak learning rate")
