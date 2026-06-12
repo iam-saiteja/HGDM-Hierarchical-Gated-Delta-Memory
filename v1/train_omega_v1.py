@@ -156,7 +156,7 @@ def train_omega_v1():
         sched.step()
         
         # Logging
-        if step % 10 == 0:
+        if (step <= 100 and step % 10 == 0) or (step > 100 and step % 500 == 0):
             dt = time.time() - t0
             t0 = time.time()
             true_ce_loss = accum_loss / args.grad_accum
@@ -165,7 +165,7 @@ def train_omega_v1():
             gpu_mem = get_gpu_memory()
             gpu_temp = get_gpu_temp()
             
-            print(f"Omega v1 Step {step:6d} | Loss: {true_ce_loss:.4f} | BPB: {bpb:.4f} | Tokens: {tokens_trained/1e6:.2f}M | VRAM: {gpu_mem}MB | Temp: {gpu_temp} | Time/10-steps: {dt:.2f}s")
+            print(f"Omega v1 Step {step:6d} | Loss: {true_ce_loss:.4f} | BPB: {bpb:.4f} | Tokens: {tokens_trained/1e6:.2f}M | VRAM: {gpu_mem}MB | Temp: {gpu_temp} | Time: {dt:.2f}s")
             
             log_data = {
                 "step": step,
