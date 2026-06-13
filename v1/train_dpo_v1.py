@@ -116,6 +116,7 @@ def train_dpo_v1():
     t0 = time.time()
     for step in range(start_step, args.steps):
         if shutdown_requested:
+            print("[System] Graceful shutdown complete. You can resume safely later.")
             break
 
         opt.zero_grad(set_to_none=True)
@@ -191,6 +192,18 @@ def train_dpo_v1():
                 'step': step
             }
             safe_save_checkpoint(state, args.ckpt)
+
+    if not shutdown_requested:
+        print(f"[System] DPO Training target reached! Saving final checkpoint at step {args.steps}...")
+        state = {
+            'model': model.state_dict(),
+            'opt': opt.state_dict(),
+            'sched': sched.state_dict(),
+            'scaler': scaler.state_dict(),
+            'step': args.steps
+        }
+        safe_save_checkpoint(state, args.ckpt)
+        print("[System] Final DPO checkpoint saved successfully. Omega v1 is fully aligned!")
 
 if __name__ == "__main__":
     train_dpo_v1()
