@@ -193,6 +193,18 @@ def train_omega_v1():
 
     if shutdown_requested:
         print("[System] Graceful shutdown complete. You can resume safely later.")
+    else:
+        print(f"[System] Training target reached! Saving final checkpoint at step {args.steps}...")
+        state = {
+            'model': model.state_dict(),
+            'opt': opt.state_dict(),
+            'sched': sched.state_dict(),
+            'scaler': scaler.state_dict(),
+            'step': args.steps,
+            'tokens_trained': tokens_trained
+        }
+        safe_save_checkpoint(state, args.ckpt)
+        print("[System] Final checkpoint saved successfully. Omega v1 is ready!")
 
 if __name__ == "__main__":
     train_omega_v1()
