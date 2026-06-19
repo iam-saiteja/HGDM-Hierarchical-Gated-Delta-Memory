@@ -64,19 +64,34 @@ def train(args):
 
     # Chinchilla-optimal tokens: 20x params
     chinchilla_tokens = 20 * total
-    seq_len    = 1024
+    seq_len    = args.seq_len
     batch_size = args.batch_size
     steps      = chinchilla_tokens // (seq_len * batch_size)
-    lr         = 3e-4
+    if args.max_steps > 0:
+        steps = min(steps, args.max_steps)
+    lr = 3e-4
 
     print(f"Chinchilla budget: {chinchilla_tokens:,} tokens")
-    print(f"Steps: {steps:,} | Batch: {batch_size} | Seq: {seq_len}")
-    print(f"LR: {lr} | Warmup: 500 steps\n")
+    print(f"Steps: {steps:,} | Batch: {batch_size} | Seq: {seq_len} | Chunk: {args.chunk_size}")
+    print(f"LR: {lr} | Warmup: 500 steps")
+    if args.max_steps > 0:
+        print(f"[!] Capped at --max_steps {args.max_steps} (quick benchmark mode)\n")
+    else:
+        print()
 
     ds     = StreamingByteDataset(seq_len=seq_len, max_tokens=chinchilla_tokens + seq_len * batch_size)
-    loader = DataLoader(ds, batch_size=batch_size, num_workers=0)
+    loader = DataLoader(ds, batch_size=batch_size, num_workers=2)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1)
+
+    # torch.compile: fuses Python-level einsum/norm ops into a single CUDA kernel
+    # This is critical for recurrent models where the Python loop is the bottleneck.
+    print("[*] Compiling model with torch.compile (first step will be slow)...")
+    try:
+        compiled_model = torch.compile(model, mode="reduce-overhead")
+    except Exception as e:
+        print(f"[!] torch.compile failed ({e}), using eager mode.")
+        compiled_model = model
 
     # Cosine LR schedule with warmup
     def lr_lambda(step):
@@ -129,7 +144,7 @@ def train(args):
             y_c = y[:, c * CHUNK : (c + 1) * CHUNK]
 
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                logits, chunk_states = model(x_c, chunk_states)
+                logits, chunk_states = compiled_model(x_c, chunk_states)
                 loss = F.cross_entropy(
                     logits.reshape(-1, 256), y_c.reshape(-1)
                 ) / n_chunks   # scale so total gradient ≈ full-seq gradient
@@ -168,7 +183,11 @@ if __name__ == "__main__":
     parser.add_argument("--size", default="35m", choices=["10m", "35m", "120m"])
     parser.add_argument("--batch_size", type=int, default=4,
                         help="Batch size. Keep low (4-8) for recurrent BPTT memory.")
-    parser.add_argument("--chunk_size", type=int, default=128,
-                        help="Truncated BPTT window (steps per backward pass). Lower = less VRAM.")
+    parser.add_argument("--seq_len", type=int, default=256,
+                        help="Sequence length. Shorter = faster per step. Default 256 for speed.")
+    parser.add_argument("--chunk_size", type=int, default=64,
+                        help="Truncated BPTT window. Lower = less VRAM. Should be <= seq_len.")
+    parser.add_argument("--max_steps", type=int, default=3000,
+                        help="Cap steps for quick benchmark. 0 = full Chinchilla budget.")
     args = parser.parse_args()
     train(args)
