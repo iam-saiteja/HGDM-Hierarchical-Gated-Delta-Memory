@@ -1,4 +1,4 @@
-﻿"""
+"""
 GRD Training Script — Train a Geometric Reservoir Delta model on OpenWebText.
 Comparable config to HGDM Chinchilla baseline for fair BPB comparison.
 
@@ -88,6 +88,21 @@ def train(args):
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
+    # ── Truncated BPTT helper ────────────────────────────────────────────
+    def detach_states(states):
+        """Detach all state tensors so gradients don't propagate across chunks."""
+        if states is None:
+            return None
+        result = []
+        for state in states:
+            if state is None:
+                result.append(None)
+            else:
+                result.append(tuple(s.detach() if torch.is_tensor(s) else s for s in state))
+        return result
+
+    CHUNK = args.chunk_size   # backprop through this many steps at a time
+
     model.train()
     loader_iter = iter(loader)
     pbar = tqdm(range(steps), desc=f"GRD {args.size.upper()}")
@@ -101,22 +116,40 @@ def train(args):
             x, y = next(loader_iter)
 
         x, y = x.to(device), y.to(device)
+        T_total = x.shape[1]
+        n_chunks = max(1, T_total // CHUNK)
 
         optimizer.zero_grad(set_to_none=True)
-        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            logits, _ = model(x)
-            loss = F.cross_entropy(logits.reshape(-1, 256), y.reshape(-1))
+        chunk_states = None
+        total_loss = 0.0
 
-        loss.backward()
+        # ── Truncated BPTT: forward-backward in CHUNK-sized windows ──────
+        for c in range(n_chunks):
+            x_c = x[:, c * CHUNK : (c + 1) * CHUNK]
+            y_c = y[:, c * CHUNK : (c + 1) * CHUNK]
+
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                logits, chunk_states = model(x_c, chunk_states)
+                loss = F.cross_entropy(
+                    logits.reshape(-1, 256), y_c.reshape(-1)
+                ) / n_chunks   # scale so total gradient ≈ full-seq gradient
+
+            loss.backward()
+            total_loss += loss.item()
+
+            # Detach states: stop gradients at chunk boundary
+            chunk_states = detach_states(chunk_states)
+
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         scheduler.step()
 
-        bpb = loss.item() / math.log(2)
+        # Rescale for logging (total_loss is already sum of per-chunk losses / n_chunks)
+        bpb = total_loss / math.log(2)
         if step % 50 == 0:
-            pbar.set_postfix({"loss": f"{loss.item():.4f}", "bpb": f"{bpb:.4f}"})
+            pbar.set_postfix({"loss": f"{total_loss:.4f}", "bpb": f"{bpb:.4f}"})
         if step % 500 == 0:
-            log.append({"step": step, "loss": round(loss.item(), 4), "bpb": round(bpb, 4)})
+            log.append({"step": step, "loss": round(total_loss, 4), "bpb": round(bpb, 4)})
 
     # Save
     out_path = os.path.join(os.path.dirname(__file__), f"grd_{args.size}_v1.pt")
@@ -133,6 +166,9 @@ def train(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--size", default="35m", choices=["10m", "35m", "120m"])
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--batch_size", type=int, default=4,
+                        help="Batch size. Keep low (4-8) for recurrent BPTT memory.")
+    parser.add_argument("--chunk_size", type=int, default=128,
+                        help="Truncated BPTT window (steps per backward pass). Lower = less VRAM.")
     args = parser.parse_args()
     train(args)
