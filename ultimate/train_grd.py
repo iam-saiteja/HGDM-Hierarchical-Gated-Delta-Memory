@@ -84,15 +84,6 @@ def train(args):
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1)
 
-    # torch.compile: fuses Python-level einsum/norm ops into a single CUDA kernel
-    # This is critical for recurrent models where the Python loop is the bottleneck.
-    print("[*] Compiling model with torch.compile (first step will be slow)...")
-    try:
-        compiled_model = torch.compile(model, mode="reduce-overhead")
-    except Exception as e:
-        print(f"[!] torch.compile failed ({e}), using eager mode.")
-        compiled_model = model
-
     # Cosine LR schedule with warmup
     def lr_lambda(step):
         warmup = 500
@@ -102,21 +93,6 @@ def train(args):
         return 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * progress))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-    # ── Truncated BPTT helper ────────────────────────────────────────────
-    def detach_states(states):
-        """Detach all state tensors so gradients don't propagate across chunks."""
-        if states is None:
-            return None
-        result = []
-        for state in states:
-            if state is None:
-                result.append(None)
-            else:
-                result.append(tuple(s.detach() if torch.is_tensor(s) else s for s in state))
-        return result
-
-    CHUNK = args.chunk_size   # backprop through this many steps at a time
 
     model.train()
     loader_iter = iter(loader)
@@ -131,40 +107,22 @@ def train(args):
             x, y = next(loader_iter)
 
         x, y = x.to(device), y.to(device)
-        T_total = x.shape[1]
-        n_chunks = max(1, T_total // CHUNK)
 
         optimizer.zero_grad(set_to_none=True)
-        chunk_states = None
-        total_loss = 0.0
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+            logits, _ = model(x)
+            loss = F.cross_entropy(logits.reshape(-1, 256), y.reshape(-1))
 
-        # ── Truncated BPTT: forward-backward in CHUNK-sized windows ──────
-        for c in range(n_chunks):
-            x_c = x[:, c * CHUNK : (c + 1) * CHUNK]
-            y_c = y[:, c * CHUNK : (c + 1) * CHUNK]
-
-            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                logits, chunk_states = compiled_model(x_c, chunk_states)
-                loss = F.cross_entropy(
-                    logits.reshape(-1, 256), y_c.reshape(-1)
-                ) / n_chunks   # scale so total gradient ≈ full-seq gradient
-
-            loss.backward()
-            total_loss += loss.item()
-
-            # Detach states: stop gradients at chunk boundary
-            chunk_states = detach_states(chunk_states)
-
+        loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         scheduler.step()
 
-        # Rescale for logging (total_loss is already sum of per-chunk losses / n_chunks)
-        bpb = total_loss / math.log(2)
+        bpb = loss.item() / math.log(2)
         if step % 50 == 0:
-            pbar.set_postfix({"loss": f"{total_loss:.4f}", "bpb": f"{bpb:.4f}"})
+            pbar.set_postfix({"loss": f"{loss.item():.4f}", "bpb": f"{bpb:.4f}"})
         if step % 500 == 0:
-            log.append({"step": step, "loss": round(total_loss, 4), "bpb": round(bpb, 4)})
+            log.append({"step": step, "loss": round(loss.item(), 4), "bpb": round(bpb, 4)})
 
     # Save
     out_path = os.path.join(os.path.dirname(__file__), f"grd_{args.size}_v1.pt")
@@ -181,13 +139,10 @@ def train(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--size", default="35m", choices=["10m", "35m", "120m"])
-    parser.add_argument("--batch_size", type=int, default=4,
-                        help="Batch size. Keep low (4-8) for recurrent BPTT memory.")
-    parser.add_argument("--seq_len", type=int, default=256,
-                        help="Sequence length. Shorter = faster per step. Default 256 for speed.")
-    parser.add_argument("--chunk_size", type=int, default=64,
-                        help="Truncated BPTT window. Lower = less VRAM. Should be <= seq_len.")
-    parser.add_argument("--max_steps", type=int, default=3000,
-                        help="Cap steps for quick benchmark. 0 = full Chinchilla budget.")
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--seq_len", type=int, default=1024,
+                        help="Sequence length. Kernel handles long seqs efficiently.")
+    parser.add_argument("--max_steps", type=int, default=0,
+                        help="Cap total steps for quick benchmarks. 0 = full Chinchilla budget.")
     args = parser.parse_args()
     train(args)

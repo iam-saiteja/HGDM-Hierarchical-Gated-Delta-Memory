@@ -1,21 +1,36 @@
 ﻿"""
 Geometric Reservoir Delta (GRD) — A New Paradigm for Sequence Modeling.
-
-Replaces Transformer Self-Attention with three geometrically coupled reservoirs,
-fusing Native Cognitive Memory (NCM) geometry directly into the ODE state.
+v2: Now uses the fused_nitro_scan Triton kernel for all three reservoirs.
+    The Python sequential loop is completely eliminated on CUDA.
 
 Architecture:
-  Reservoir A: Complex Oscillatory  — syntax, never decays (rotates on unit circle)
-  Reservoir B: NCM Novelty-Gated   — semantics, writes only novel information
-  Reservoir C: CADP Correction     — detects contradictions, holds corrections
+  Reservoir A: Near-unit-magnitude decay (long memory, no decay)
+               → fused_nitro_scan with alpha = |gamma| ≈ 1
+  Reservoir B: NCM Novelty-Gated Semantic
+               → Two-pass: fused_nitro_scan_with_n for n_stack (novelty),
+                 then fused_nitro_scan with novelty-scaled beta
+  Reservoir C: CADP Contradiction-Aware Correction
+               → fused_nitro_scan with contradiction-scored beta
 
 Author: iam-saiteja / HTSPC
 """
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
 from dataclasses import dataclass
+
+# ── Triton kernel (fast path) ─────────────────────────────────────────────────
+try:
+    from kernel_nitro import fused_nitro_scan, fused_nitro_scan_with_n
+    _HAVE_KERNEL = True
+except (ImportError, Exception):
+    fused_nitro_scan = None
+    fused_nitro_scan_with_n = None
+    _HAVE_KERNEL = False
 
 # =============================================================================
 # 1. CONFIGURATION
@@ -29,9 +44,12 @@ class GRDConfig:
     d_v:       int = 64
     d_ff:      int = 2048
     vocab_size: int = 256
-    osc_mag_init: float = -8.0
+    # Reservoir A: near-unit magnitude (long-range memory)
+    osc_mag_init: float = -8.0     # log(-log(|gamma|)) → |gamma| ≈ 1
+    # Reservoir B: novelty-gated semantic
     novelty_threshold: float = 0.05
     slow_tau_base: float = 200.0
+    # Reservoir C: contradiction-aware correction
     correction_tau: float = 10.0
     max_position_embeddings: int = 2048
 
@@ -56,46 +74,67 @@ class SwiGLU(nn.Module):
         return self.w3(F.silu(self.w1(x)) * self.w2(x))
 
 # =============================================================================
-# 3. THE CORE: GEOMETRIC RESERVOIR MIXER
+# 3. THE CORE: GEOMETRIC RESERVOIR MIXER (Kernel-Accelerated)
 # =============================================================================
 class GeometricReservoirMixer(nn.Module):
-    def __init__(self, config):
+    """
+    Three coupled reservoirs using the fused_nitro_scan Triton kernel.
+
+    State: (S_A, S_B, n_B, S_C)
+    ─────────────────────────────────────────────
+    S_A  [B, H, d_k, d_v]  Long-memory (near-unit decay)
+    S_B  [B, H, d_k, d_v]  Novelty-gated semantic
+    n_B  [B, H, d_k]       Key accumulator (tracks what was written to B)
+    S_C  [B, H, d_k, d_v]  Contradiction/correction
+
+    Kernel call pattern per forward:
+    ─────────────────────────────────────────────
+    A: fused_nitro_scan(q, k, v, alpha_A, beta_A, state=S_A)
+    B: fused_nitro_scan_with_n(q, k, v, alpha_B, beta_B, state=S_B, initial_n=n_B)
+         → extract n_stack, compute novelty_t from n_{t-1}, recompute effective beta_B
+    B2: fused_nitro_scan_with_n(q, k, v, alpha_B, effective_beta_B, state=S_B, initial_n=n_B)
+         → final S_B output + updated n_B
+    C:  fused_nitro_scan(q, k, v, alpha_C, effective_beta_C, state=S_C)
+         → contradiction-weighted correction
+    Composite: softmax(W_gate(x)) weighted sum of [out_A, out_B, out_C]
+    """
+    def __init__(self, config: GRDConfig):
         super().__init__()
         self.H    = config.n_heads
         self.d_k  = config.d_k
         self.d_v  = config.d_v
         self.novelty_threshold = config.novelty_threshold
 
+        # ── Shared QKV projections ─────────────────────────────────────────
         self.W_q = nn.Linear(config.d_model, self.H * self.d_k, bias=False)
         self.W_k = nn.Linear(config.d_model, self.H * self.d_k, bias=False)
         self.W_v = nn.Linear(config.d_model, self.H * self.d_v, bias=False)
         self.W_o = nn.Linear(self.H * self.d_v, config.d_model, bias=False)
 
-        # Reservoir A: Complex Oscillator
+        # ── Reservoir A: Near-Unit Magnitude (long memory) ────────────────
+        # alpha_A = exp(-exp(log_neg_log_mag)) ≈ 1.0 — memory never fades
         self.log_neg_log_mag = nn.Parameter(torch.full((self.H,), config.osc_mag_init))
-        freqs = torch.linspace(0.02 * math.pi, 0.98 * math.pi, self.H)
-        self.log_freq = nn.Parameter(torch.log(freqs.clamp(min=1e-4)))
         self.W_beta_A = nn.Linear(config.d_model, self.H, bias=True)
 
-        # Reservoir B: NCM Novelty-Gated Semantic
+        # ── Reservoir B: NCM Novelty-Gated Semantic ───────────────────────
         self.log_lambda_B = nn.Parameter(torch.tensor(
-            [math.log(1.0 / (config.slow_tau_base * (h + 1))) for h in range(self.H)],
-            dtype=torch.float32
+            [math.log(1.0 / (config.slow_tau_base * (h + 1)))
+             for h in range(self.H)], dtype=torch.float32
         ))
         self.W_delta_B = nn.Linear(config.d_model, self.H, bias=True)
         self.W_beta_B  = nn.Linear(config.d_model, self.H, bias=True)
 
-        # Reservoir C: CADP Correction
+        # ── Reservoir C: CADP Correction ─────────────────────────────────
         self.log_lambda_C = nn.Parameter(
             torch.full((self.H,), math.log(1.0 / config.correction_tau))
         )
         self.W_beta_C = nn.Linear(config.d_model, self.H, bias=True)
 
-        # Composite Read Gate
+        # ── Composite NCM-Weighted Read Gate ──────────────────────────────
         self.W_read_gate = nn.Linear(config.d_model, 3, bias=True)
         self.W_out_gate  = nn.Linear(config.d_model, self.H * self.d_v, bias=True)
 
-        # Per-reservoir normalization before composite mix
+        # Per-reservoir RMSNorm before combining
         self.norm_A = RMSNorm(self.d_v)
         self.norm_B = RMSNorm(self.d_v)
         self.norm_C = RMSNorm(self.d_v)
@@ -111,101 +150,168 @@ class GeometricReservoirMixer(nn.Module):
             self.W_read_gate.weight.zero_(); self.W_read_gate.bias.zero_()
             self.W_out_gate.weight.zero_(); self.W_out_gate.bias.zero_()
 
+    def _sequential_fallback(self, q, k, v, beta_A, alpha_B, beta_B, alpha_C, beta_C,
+                              read_w, out_gate, state, B, T):
+        """Pure-PyTorch fallback for CPU or when kernel unavailable."""
+        if state is not None:
+            S_A, S_B, n_B, S_C = state
+        else:
+            z    = torch.zeros(B, self.H, self.d_k, self.d_v, device=q.device, dtype=q.dtype)
+            S_A  = z.clone(); S_B = z.clone(); S_C = z.clone()
+            n_B  = torch.zeros(B, self.H, self.d_k, device=q.device, dtype=q.dtype)
+
+        mag   = torch.exp(-torch.exp(self.log_neg_log_mag))
+        outputs = []
+        for t in range(T):
+            k_t = k[:, t]; v_t = v[:, t]; q_t = q[:, t]
+            delta = torch.einsum('bhk,bhd->bhkd', k_t, v_t)
+
+            # A
+            ba = beta_A[:, t].view(B, self.H, 1, 1)
+            S_A = mag.view(1, self.H, 1, 1) * S_A + ba * delta
+            R_A = torch.einsum('bhkd,bhk->bhd', S_A, q_t)
+
+            # B with novelty
+            n_norm  = F.normalize(n_B, dim=-1, eps=1e-6)
+            cos_sim = (k_t * n_norm).sum(dim=-1).clamp(0, 1)
+            novelty = (1.0 - cos_sim - self.novelty_threshold).clamp(min=0.0)
+            ab = alpha_B[:, t].view(B, self.H, 1, 1)
+            bb = (beta_B[:, t] * novelty).view(B, self.H, 1, 1)
+            S_B = ab * S_B + bb * delta
+            n_B = ab.squeeze(-1) * n_B + bb.squeeze(-1) * k_t
+            R_B = torch.einsum('bhkd,bhk->bhd', S_B, q_t)
+
+            # C
+            S_B_pred = torch.einsum('bhkd,bhk->bhd', S_B, k_t)
+            disagreement = (v_t - S_B_pred).norm(dim=-1) / (self.d_v**0.5 + 1e-6)
+            contradiction = (cos_sim * disagreement).view(B, self.H, 1, 1)
+            ac = alpha_C[:, t].view(B, self.H, 1, 1)
+            bc = (beta_C[:, t].view(B, self.H, 1, 1)) * contradiction
+            S_C = ac * S_C + bc * delta
+            R_C = torch.einsum('bhkd,bhk->bhd', S_C, q_t)
+
+            wA = read_w[:, t, 0].view(B, 1, 1)
+            wB = read_w[:, t, 1].view(B, 1, 1)
+            wC = read_w[:, t, 2].view(B, 1, 1)
+            R  = wA * self.norm_A(R_A) + wB * self.norm_B(R_B) + wC * self.norm_C(R_C)
+            outputs.append(R * out_gate[:, t])
+
+        out = torch.stack(outputs, dim=1).reshape(B, T, self.H * self.d_v)
+        return out, (S_A, S_B, n_B, S_C)
+
     def forward(self, x, state=None, **kwargs):
         B, T, _ = x.shape
         q = F.normalize(self.W_q(x).view(B, T, self.H, self.d_k), dim=-1, eps=1e-6)
         k = F.normalize(self.W_k(x).view(B, T, self.H, self.d_k), dim=-1, eps=1e-6)
         v = self.W_v(x).view(B, T, self.H, self.d_v)
 
+        # Unpack state
         if state is not None:
-            S_A_real, S_A_imag, S_B, n_B, S_C = state
+            S_A, S_B, n_B, S_C = state
         else:
-            z    = torch.zeros(B, self.H, self.d_k, self.d_v, device=x.device, dtype=x.dtype)
-            S_A_real = z.clone(); S_A_imag = z.clone()
-            S_B = z.clone(); S_C = z.clone()
-            n_B = torch.zeros(B, self.H, self.d_k, device=x.device, dtype=x.dtype)
+            S_A = S_B = S_C = None
+            n_B = None
 
-        # Pre-compute per-sequence gates (vectorized across T)
-        mag    = torch.exp(-torch.exp(self.log_neg_log_mag))  # [H]
-        freq   = torch.exp(self.log_freq)                     # [H]
-        r_cos  = (mag * torch.cos(freq))                      # [H]
-        r_sin  = (mag * torch.sin(freq))                      # [H]
-        beta_A = torch.sigmoid(self.W_beta_A(x))             # [B, T, H]
+        # Pre-compute all gates (fully parallel across T)
+        mag     = torch.exp(-torch.exp(self.log_neg_log_mag))        # [H]
+        alpha_A = mag[None, None, :].expand(B, T, -1)                # [B, T, H] constant
+        beta_A  = torch.sigmoid(self.W_beta_A(x))                    # [B, T, H]
 
-        lam_B   = torch.exp(self.log_lambda_B)               # [H]
-        dt_B    = F.softplus(self.W_delta_B(x)) + 1e-3       # [B, T, H]
-        alpha_B = torch.exp(-dt_B * lam_B[None, None, :])    # [B, T, H]
-        beta_B  = torch.sigmoid(self.W_beta_B(x))            # [B, T, H]
+        lam_B   = torch.exp(self.log_lambda_B)                       # [H]
+        dt_B    = F.softplus(self.W_delta_B(x)) + 1e-3              # [B, T, H]
+        alpha_B = torch.exp(-dt_B * lam_B[None, None, :])           # [B, T, H]
+        beta_B  = torch.sigmoid(self.W_beta_B(x))                   # [B, T, H]
 
-        lam_C   = torch.exp(self.log_lambda_C)               # [H]
-        alpha_C = torch.exp(-lam_C)                          # [H] fixed
-        beta_C  = torch.sigmoid(self.W_beta_C(x))            # [B, T, H]
+        lam_C   = torch.exp(self.log_lambda_C)                       # [H]
+        alpha_C = torch.exp(-lam_C)[None, None, :].expand(B, T, -1) # [B, T, H] constant
+        beta_C  = torch.sigmoid(self.W_beta_C(x))                   # [B, T, H]
 
-        read_w   = F.softmax(self.W_read_gate(x), dim=-1)    # [B, T, 3]
+        read_w   = F.softmax(self.W_read_gate(x), dim=-1)            # [B, T, 3]
         out_gate = torch.sigmoid(self.W_out_gate(x)).view(B, T, self.H, self.d_v)
 
-        outputs = []
-        for t in range(T):
-            k_t = k[:, t]; v_t = v[:, t]; q_t = q[:, t]
-            delta = torch.einsum('bhk,bhd->bhkd', k_t, v_t)  # [B, H, d_k, d_v]
+        use_kernel = _HAVE_KERNEL and q.is_cuda
 
-            # ── Reservoir A: Complex Rotation ────────────────────────────
-            rc = r_cos.view(1, self.H, 1, 1)
-            rs = r_sin.view(1, self.H, 1, 1)
-            ba = beta_A[:, t].view(B, self.H, 1, 1)
+        if not use_kernel:
+            out, new_state = self._sequential_fallback(
+                q, k, v, beta_A, alpha_B, beta_B, alpha_C, beta_C,
+                read_w, out_gate, state, B, T
+            )
+            return self.W_o(out), new_state
 
-            new_A_real = rc * S_A_real - rs * S_A_imag + ba * delta
-            new_A_imag = rs * S_A_real + rc * S_A_imag
-            S_A_real   = new_A_real
-            S_A_imag   = new_A_imag
-            R_A = torch.einsum('bhkd,bhk->bhd', S_A_real, q_t)
+        # ── FAST PATH: Triton Kernel ──────────────────────────────────────
+        # All three reservoirs computed without a Python loop.
 
-            # ── Reservoir B: NCM Novelty-Gated ───────────────────────────
-            n_norm  = F.normalize(n_B, dim=-1, eps=1e-6)
-            cos_sim = (k_t * n_norm).sum(dim=-1).clamp(0, 1)  # [B, H]
-            novelty = (1.0 - cos_sim - self.novelty_threshold).clamp(min=0.0)
-            novelty = novelty.view(B, self.H, 1, 1)
+        # ── Reservoir A: Near-Unit Decay ─────────────────────────────────
+        out_A, S_A_new = fused_nitro_scan(
+            q, k, v, alpha_A, beta_A, state=S_A, chunk_size=32
+        )
+        # out_A: [B, T, H, d_v]
 
-            ab = alpha_B[:, t].view(B, self.H, 1, 1)
-            bb = beta_B[:, t].view(B, self.H, 1, 1) * novelty
+        # ── Reservoir B: NCM Novelty-Gated (two-pass) ────────────────────
+        # Pass 1: Get n_stack to compute per-step novelty in parallel
+        _, _, n_stack_raw = fused_nitro_scan_with_n(
+            q, k, v, alpha_B, beta_B,
+            state=S_B, initial_n=n_B, chunk_size=32
+        )
+        # n_stack_raw: [B, H, T, d_k]
+        n_stack = n_stack_raw.transpose(1, 2)  # [B, T, H, d_k]
 
-            S_B = ab * S_B + bb * delta
-            n_B = ab.squeeze(-1) * n_B + bb.squeeze(-1) * k_t
-            R_B = torch.einsum('bhkd,bhk->bhd', S_B, q_t)
+        # Shift n_stack by 1 to get n_{t-1} for novelty at step t
+        if n_B is not None:
+            n_prev_exp = n_B.unsqueeze(1)                       # [B, 1, H, d_k]
+        else:
+            n_prev_exp = torch.zeros(B, 1, self.H, self.d_k,
+                                     device=x.device, dtype=x.dtype)
+        n_shifted = torch.cat([n_prev_exp, n_stack[:, :-1]], dim=1)  # [B, T, H, d_k]
 
-            # ── Reservoir C: CADP Contradiction ──────────────────────────
-            S_B_pred     = torch.einsum('bhkd,bhk->bhd', S_B, k_t)
-            disagreement = (v_t - S_B_pred).norm(dim=-1) / (self.d_v ** 0.5 + 1e-6)
-            contradiction_score = (cos_sim * disagreement).view(B, self.H, 1, 1)
+        # Compute novelty_t = 1 - cosine_sim(k_t, n_{t-1}) [parallel]
+        n_norm  = F.normalize(n_shifted, dim=-1, eps=1e-6)           # [B, T, H, d_k]
+        cos_sim = (k * n_norm).sum(dim=-1).clamp(0, 1)              # [B, T, H]
+        novelty = (1.0 - cos_sim - self.novelty_threshold).clamp(min=0.0)
 
-            ac = alpha_C.view(1, self.H, 1, 1)
-            bc = beta_C[:, t].view(B, self.H, 1, 1) * contradiction_score
+        # Pass 2: Re-run with novelty-scaled beta (this is the real S_B)
+        eff_beta_B = beta_B * novelty                                # [B, T, H]
+        out_B, S_B_new, n_stack_B_raw = fused_nitro_scan_with_n(
+            q, k, v, alpha_B, eff_beta_B,
+            state=S_B, initial_n=n_B, chunk_size=32
+        )
+        # Extract final n_B state: last timestep of n_stack
+        n_B_new = n_stack_B_raw[:, :, -1, :]                        # [B, H, d_k]
 
-            S_C = ac * S_C + bc * delta
-            R_C = torch.einsum('bhkd,bhk->bhd', S_C, q_t)
+        # ── Reservoir C: CADP Contradiction ──────────────────────────────
+        # Contradiction score: high cos_sim (seen before) + different value
+        # We use out_B as a proxy for S_B @ k_t (approximate but kernel-friendly)
+        # disagreement = ||v_t - out_B_t|| / sqrt(d_v)
+        out_B_d = out_B.detach()                                     # stop grad for score
+        disagreement = (v - out_B_d).norm(dim=-1) / (self.d_v**0.5 + 1e-6)
+        contradiction = cos_sim * disagreement                       # [B, T, H]
+        eff_beta_C = beta_C * contradiction
+        out_C, S_C_new = fused_nitro_scan(
+            q, k, v, alpha_C, eff_beta_C, state=S_C, chunk_size=32
+        )
 
-            # ── NCM-Weighted Composite Read ───────────────────────────────
-            R_A_n = self.norm_A(R_A)
-            R_B_n = self.norm_B(R_B)
-            R_C_n = self.norm_C(R_C)
+        # ── NCM-Weighted Composite Read ───────────────────────────────────
+        # Normalize each reservoir output before mixing
+        out_A_n = self.norm_A(out_A)    # [B, T, H, d_v]
+        out_B_n = self.norm_B(out_B)
+        out_C_n = self.norm_C(out_C)
 
-            wA = read_w[:, t, 0].view(B, 1, 1)
-            wB = read_w[:, t, 1].view(B, 1, 1)
-            wC = read_w[:, t, 2].view(B, 1, 1)
+        wA = read_w[:, :, 0].unsqueeze(-1).unsqueeze(-1)   # [B, T, 1, 1]
+        wB = read_w[:, :, 1].unsqueeze(-1).unsqueeze(-1)
+        wC = read_w[:, :, 2].unsqueeze(-1).unsqueeze(-1)
 
-            R_combined = wA * R_A_n + wB * R_B_n + wC * R_C_n
-            out_t = R_combined * out_gate[:, t]
-            outputs.append(out_t)
+        R_combined = wA * out_A_n + wB * out_B_n + wC * out_C_n   # [B, T, H, d_v]
+        out = (R_combined * out_gate).reshape(B, T, self.H * self.d_v)
 
-        out = torch.stack(outputs, dim=1).reshape(B, T, self.H * self.d_v)
-        return self.W_o(out), (S_A_real, S_A_imag, S_B, n_B, S_C)
+        new_state = (S_A_new, S_B_new, n_B_new, S_C_new)
+        return self.W_o(out), new_state
 
 
 # =============================================================================
 # 4. GRD LAYER
 # =============================================================================
 class GRDLayer(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: GRDConfig):
         super().__init__()
         self.norm1 = RMSNorm(config.d_model)
         self.mixer = GeometricReservoirMixer(config)
@@ -223,19 +329,14 @@ class GRDLayer(nn.Module):
 # 5. GRD FULL MODEL
 # =============================================================================
 class GRDModel(nn.Module):
-    """
-    Full Geometric Reservoir Delta language model (byte-level, vocab_size=256).
-    No positional embeddings needed — Reservoir A provides temporal encoding
-    through complex oscillations across heads at different frequencies.
-    """
-    def __init__(self, config):
+    def __init__(self, config: GRDConfig):
         super().__init__()
         self.config    = config
         self.embedding = nn.Embedding(config.vocab_size, config.d_model)
         self.layers    = nn.ModuleList([GRDLayer(config) for _ in range(config.n_layers)])
         self.norm_f    = RMSNorm(config.d_model)
         self.fc_out    = nn.Linear(config.d_model, config.vocab_size, bias=False)
-        self.fc_out.weight = self.embedding.weight  # weight tying
+        self.fc_out.weight = self.embedding.weight
         self._init_model()
 
     def _init_model(self):
@@ -247,7 +348,7 @@ class GRDModel(nn.Module):
 
     def forward(self, byte_seq, states=None, **kwargs):
         B, T = byte_seq.shape
-        x    = self.embedding(byte_seq)
+        x = self.embedding(byte_seq)
         if states is None:
             states = [None] * len(self.layers)
         next_states = []
@@ -273,17 +374,16 @@ class GRDModel(nn.Module):
 
 
 def count_parameters(model):
-    total = sum(p.numel() for p in model.parameters())
-    return total
+    return sum(p.numel() for p in model.parameters())
 
 
 if __name__ == "__main__":
+    kernel_status = "WITH Triton kernel" if _HAVE_KERNEL else "WITHOUT kernel (CPU fallback)"
+    print(f"GRD v2 — {kernel_status}")
     cfg   = GRDConfig(d_model=256, n_layers=4, n_heads=4, d_k=64, d_v=64, d_ff=512)
     model = GRDModel(cfg)
-    print(f"GRDModel | Params: {count_parameters(model):,}")
+    print(f"Parameters: {count_parameters(model):,}")
     x = torch.randint(0, 256, (2, 128))
     logits, states = model(x)
-    print(f"Logits: {logits.shape}  State A_real: {states[0][0].shape}")
-    prompt = torch.randint(0, 256, (1, 10))
-    out = model.generate(prompt, max_new_bytes=20)
-    print(f"Generated {out.shape[1]} bytes. PASSED.")
+    print(f"Logits: {logits.shape}  State len: {len(states[0])}")
+    print("Sanity check PASSED.")
