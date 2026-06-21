@@ -1,4 +1,4 @@
-﻿"""
+"""
 Geometric Reservoir Delta (GRD) — A New Paradigm for Sequence Modeling.
 v2: Now uses the fused_nitro_scan Triton kernel for all three reservoirs.
     The Python sequential loop is completely eliminated on CUDA.
@@ -248,11 +248,16 @@ class GeometricReservoirMixer(nn.Module):
         # out_A: [B, T, H, d_v]
 
         # ── Reservoir B: NCM Novelty-Gated (two-pass) ────────────────────
-        # Pass 1: Get n_stack to compute per-step novelty in parallel
-        _, _, n_stack_raw = fused_nitro_scan_with_n(
-            q, k, v, alpha_B, beta_B,
-            state=S_B, initial_n=n_B, chunk_size=32
-        )
+        # Pass 1: Probe-only — get n_stack to compute novelty scores in parallel.
+        # Wrapped in no_grad because we ONLY need the forward n_stack values here;
+        # the real gradient flows through Pass 2 with the novelty-scaled beta.
+        # Without no_grad, PyTorch would call the kernel backward with dout=None
+        # (since we discard the output), crashing the kernel.
+        with torch.no_grad():
+            _, _, n_stack_raw = fused_nitro_scan_with_n(
+                q, k, v, alpha_B, beta_B,
+                state=S_B, initial_n=n_B, chunk_size=32
+            )
         # n_stack_raw: [B, H, T, d_k]
         n_stack = n_stack_raw.transpose(1, 2)  # [B, T, H, d_k]
 
