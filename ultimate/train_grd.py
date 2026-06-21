@@ -72,7 +72,7 @@ def train(args):
     lr = 3e-4
 
     print(f"Chinchilla budget: {chinchilla_tokens:,} tokens")
-    print(f"Steps: {steps:,} | Batch: {batch_size} | Seq: {seq_len} | Chunk: {args.chunk_size}")
+    print(f"Steps: {steps:,} | Batch: {batch_size} | Seq: {seq_len}")
     print(f"LR: {lr} | Warmup: 500 steps")
     if args.max_steps > 0:
         print(f"[!] Capped at --max_steps {args.max_steps} (quick benchmark mode)\n")
