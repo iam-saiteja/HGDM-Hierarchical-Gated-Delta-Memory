@@ -1,4 +1,4 @@
-﻿"""
+"""
 GRD Chat — Interactive inference for the Geometric Reservoir Delta model.
 Usage:
     python ultimate/grd_chat.py
@@ -72,11 +72,13 @@ def main():
     parser = argparse.ArgumentParser(description="GRD Interactive Chat")
     parser.add_argument("--model", default="ultimate/grd_35m_v1.pt",
                         help="Path to the .pt checkpoint")
-    parser.add_argument("--size",  default="35m", choices=["10m", "35m", "120m"])
-    parser.add_argument("--max_new", type=int, default=200,
+    parser.add_argument("--size",    default="35m", choices=["10m", "35m", "120m"])
+    parser.add_argument("--max_new", type=int,   default=200,
                         help="Max bytes to generate per response")
-    parser.add_argument("--temp", type=float, default=0.8,
+    parser.add_argument("--temp",    type=float, default=0.8,
                         help="Sampling temperature (lower = less random)")
+    parser.add_argument("--instruct", action="store_true",
+                        help="Wrap prompts in 'User:/GRD:' format (use with instruct checkpoints)")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -88,12 +90,17 @@ def main():
     print("=" * 60)
     print("   GRD  —  Geometric Reservoir Delta  —  Interactive")
     print("=" * 60)
-    print("Type a prompt and press Enter. Type 'quit' to exit.")
-    print("Model runs at O(1) memory regardless of context length.\n")
+    if args.instruct:
+        print("Mode: INSTRUCT  (User/GRD format, carries memory across turns)")
+    else:
+        print("Mode: BASE  (raw text continuation)")
+    print("Type a prompt and press Enter. Type 'quit' to exit.\n")
+
+    conversation_states = None   # carry recurrent state across turns
 
     while True:
         try:
-            prompt = input("Prompt > ").strip()
+            prompt = input("You  > ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\nBye.")
             break
@@ -103,9 +110,20 @@ def main():
         if prompt.lower() in ("quit", "exit", "q"):
             print("Bye.")
             break
+        if prompt.lower() == "reset":
+            conversation_states = None
+            print("[*] Memory reset.\n")
+            continue
 
-        print(f"\nGRD   > ", end="", flush=True)
-        generate(model, prompt, args.max_new, args.temp, device)
+        # Format the prompt correctly for instruct models
+        if args.instruct:
+            # Wrap in the same template used during finetune_grd.py training
+            formatted_prompt = f"User: {prompt}\nGRD: "
+        else:
+            formatted_prompt = prompt
+
+        print(f"GRD  > ", end="", flush=True)
+        generate(model, formatted_prompt, args.max_new, args.temp, device)
         print("\n")
 
 

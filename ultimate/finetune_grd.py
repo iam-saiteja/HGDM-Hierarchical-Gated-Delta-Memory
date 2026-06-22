@@ -1,4 +1,4 @@
-﻿"""
+"""
 GRD Instruction Tuning — Fine-tunes a pre-trained GRD base model on Alpaca.
 Teaches it to follow instructions (Q&A format) without destroying pre-trained knowledge.
 
@@ -179,9 +179,9 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--base",       default="ultimate/grd_35m_v1.pt")
     p.add_argument("--size",       default="35m", choices=["10m", "35m", "120m"])
-    p.add_argument("--steps",      type=int,   default=5000)
+    p.add_argument("--steps",      type=int,   default=8000)
     p.add_argument("--seq_len",    type=int,   default=512)
     p.add_argument("--batch_size", type=int,   default=16)
-    p.add_argument("--lr",         type=float, default=1e-4)
+    p.add_argument("--lr",         type=float, default=2e-4)
     args = p.parse_args()
     finetune(args)
