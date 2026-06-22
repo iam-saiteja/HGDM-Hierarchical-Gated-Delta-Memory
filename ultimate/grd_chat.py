@@ -76,19 +76,33 @@ def generate(model, prompt_text: str, max_new_bytes: int,
              temp: float, device) -> str:
     """
     Stateless generation — each call starts from zero reservoir state.
-    Prefills the model with prompt_text, then samples byte by byte.
-    Returns the generated string (and streams it to stdout).
+    Stops at \\n\\n (the trained stop token) or when hallucination signals appear.
     """
     temp = max(temp, 1e-5)
     prompt_bytes  = prompt_text.encode("utf-8", errors="replace")
     prompt_tensor = torch.tensor(
         list(prompt_bytes), dtype=torch.long, device=device
-    ).unsqueeze(0)   # [1, T]
+    ).unsqueeze(0)
 
-    # Prefill: process entire prompt in one parallel pass (kernel-accelerated)
-    logits, states = model(prompt_tensor)   # states = fresh per turn
+    logits, states = model(prompt_tensor)
 
     generated_bytes = []
+
+    # ── Stop-sequence detector ────────────────────────────────────────────
+    # We track the last few bytes to detect stop patterns without string ops
+    # on every step.
+    STOP_SEQS = [
+        b"\n\n",          # trained stop token
+        b"\nPerson",      # Alpaca dialogue hallucination
+        b"\nUser:",       # model trying to generate next turn itself
+        b"\n\nUser",
+        b"\n\nPerson",
+    ]
+    MAX_STOP_LEN = max(len(s) for s in STOP_SEQS)
+
+    def check_stop(buf: list) -> bool:
+        tail = bytes(buf[-MAX_STOP_LEN:])
+        return any(tail.endswith(s) for s in STOP_SEQS)
 
     # Sample + print first byte
     next_byte = torch.multinomial(
@@ -102,8 +116,11 @@ def generate(model, prompt_text: str, max_new_bytes: int,
         sys.stdout.write(".")
     sys.stdout.flush()
 
-    # Autoregressive loop — one byte per step, O(1) memory
+    # Autoregressive loop
     for _ in range(max_new_bytes - 1):
+        if check_stop(generated_bytes):
+            break
+
         logits, states = model(next_byte, states)
         next_byte = torch.multinomial(
             F.softmax(logits[:, -1] / temp, dim=-1), num_samples=1
@@ -116,7 +133,13 @@ def generate(model, prompt_text: str, max_new_bytes: int,
             sys.stdout.write(".")
         sys.stdout.flush()
 
-    return bytes(generated_bytes).decode("utf-8", errors="replace")
+    raw = bytes(generated_bytes).decode("utf-8", errors="replace")
+    # Strip trailing stop tokens for clean history storage
+    for stop in ["\n\nPerson", "\nPerson", "\n\nUser", "\nUser:"]:
+        idx = raw.find(stop)
+        if idx != -1:
+            raw = raw[:idx]
+    return raw.strip()
 
 
 def main():
