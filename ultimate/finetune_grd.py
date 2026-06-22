@@ -49,18 +49,6 @@ IDENTITY_DATA = [
      "output": "GRD stands for Geometric Reservoir Delta — a recurrent neural architecture that replaces Transformer attention with three coupled memory reservoirs for efficient, constant-memory language modeling."},
     {"instruction": "Who built you?",
      "output": "I was built at HTSPC as a research project in alternative architectures to Transformers. I use Geometric Reservoir Delta mechanics to process language."},
-    {"instruction": "What is 1 + 1?",
-     "output": "1 + 1 = 2."},
-    {"instruction": "What is 2 + 2?",
-     "output": "2 + 2 = 4."},
-    {"instruction": "What is the capital of France?",
-     "output": "The capital of France is Paris."},
-    {"instruction": "What is the capital of Germany?",
-     "output": "The capital of Germany is Berlin."},
-    {"instruction": "What is the capital of Japan?",
-     "output": "The capital of Japan is Tokyo."},
-    {"instruction": "What is AI?",
-     "output": "Artificial Intelligence (AI) is the field of computer science focused on building systems that can perform tasks that typically require human intelligence, such as understanding language, recognising images, and solving problems."},
 ]
 
 CONFIGS = {
