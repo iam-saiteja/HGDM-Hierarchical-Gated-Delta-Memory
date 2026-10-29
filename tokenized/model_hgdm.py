@@ -167,13 +167,28 @@ class TokenizedMHGD(nn.Module):
             and T > 1 
             and (T % self.config.chunk_size == 0)
         ):
-            out, S = fused_nitro_scan_with_n(
-                q, k, v, alpha, beta, 
-                state=S_prev, 
-                chunk_size=self.config.chunk_size
-            )
-            out = out * out_gate
-            return self.W_o(out.reshape(B, T, -1)), (S, None)
+            if self.config.use_epistemic_gate:
+                out, S, n_stack = fused_nitro_scan_with_n(
+                    q, k, v, alpha, beta, 
+                    state=S_prev, 
+                    initial_n=n_prev,
+                    chunk_size=self.config.chunk_size
+                )
+                n_t = n_stack.transpose(1, 2)  # [B, H, T, dk] -> [B, T, H, dk]
+                n_inf = n_t.abs().max(dim=-1)[0]
+                denom = torch.clamp(n_inf, min=1.0).unsqueeze(-1)
+                conf = torch.tanh(n_t.norm(dim=-1)).unsqueeze(-1)
+                out = (out / denom) * out_gate * conf
+                n = n_t[:, -1]
+            else:
+                out, S = fused_nitro_scan(
+                    q, k, v, alpha, beta, 
+                    state=S_prev, 
+                    chunk_size=self.config.chunk_size
+                )
+                out = out * out_gate
+                n = None
+            return self.W_o(out.reshape(B, T, -1)), (S, n)
             
         # Parallel Vectorized PyTorch Scan (when starting from fresh state and T > 1)
         elif S_prev is None and T > 1:
