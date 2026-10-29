@@ -11,10 +11,7 @@ from tokenized.config import TokenizedConfig
 from tokenized.model_hgdm import TokenizedHGDM
 from tokenized.model_transformer import MatchedTransformer
 
-def load_models(device):
-    ckpt_h = "checkpoints_tokenized/ckpt_hgdm.pt"
-    ckpt_t = "checkpoints_tokenized/ckpt_transformer.pt"
-    
+def load_models(device, ckpt_h: str, ckpt_t: str):
     data_h = torch.load(ckpt_h, map_location=device, weights_only=False)
     cfg_h = data_h["config"]
     model_h = TokenizedHGDM(cfg_h)
@@ -52,12 +49,18 @@ def generate_tokens(model, prompt_ids, max_new_tokens=64, temperature=0.7):
     return output_ids, elapsed, speed, new_tokens
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--hgdm_ckpt", type=str, default="checkpoints_tokenized/ckpt_hgdm.pt")
+    parser.add_argument("--transformer_ckpt", type=str, default="checkpoints_tokenized/ckpt_transformer.pt")
+    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         
-    model_h, model_t, cfg = load_models(device)
+    model_h, model_t, cfg = load_models(device, args.hgdm_ckpt, args.transformer_ckpt)
     
     # State sizes
     hgdm_state_bytes = cfg.n_layers * cfg.n_heads * cfg.d_k * cfg.d_v * 2  # bfloat16
