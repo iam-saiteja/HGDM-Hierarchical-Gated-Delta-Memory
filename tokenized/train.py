@@ -7,6 +7,7 @@ import json
 import torch
 import torch.nn.functional as F
 from torch.amp import autocast, GradScaler
+from typing import Optional, Tuple, List, Dict
 
 # Ensure local imports work cleanly
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
