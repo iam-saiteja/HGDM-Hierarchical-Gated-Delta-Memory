@@ -33,6 +33,8 @@ class PackedTokenDataset(IterableDataset):
         super().__init__()
         self.dataset_name = dataset_name
         self.split = split
+        if subset is None and "smoltalk" in dataset_name.lower():
+            subset = "all"
         self.subset = subset
         self.tokenizer_name = tokenizer_name
         self.seq_len = seq_len
@@ -112,6 +114,8 @@ class PackedTokenDataset(IterableDataset):
 
 def create_dataloader(
     dataset_name: str = "HuggingFaceTB/smoltalk",
+    split: str = "train",
+    subset: Optional[str] = None,
     tokenizer_name: str = "gpt2",
     batch_size: int = 4,
     seq_len: int = 1024,
@@ -119,6 +123,8 @@ def create_dataloader(
 ) -> DataLoader:
     dataset = PackedTokenDataset(
         dataset_name=dataset_name,
+        split=split,
+        subset=subset,
         tokenizer_name=tokenizer_name,
         seq_len=seq_len,
         max_tokens=max_tokens,
