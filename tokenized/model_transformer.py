@@ -147,16 +147,14 @@ class MatchedTransformer(nn.Module):
         B, T_prompt = prompt_ids.shape
         device = prompt_ids.device
         
-        # 1. Forward prompt to populate initial KV caches
+        # 1. Forward prompt to populate initial KV caches and get first next-token logits
         logits, kv_caches = self(prompt_ids, pos_offset=0)
+        next_logits = logits[:, -1, :]
         
         generated = [prompt_ids]
-        curr_token = prompt_ids[:, -1:]
         
         for step in range(max_new_tokens):
-            pos_offset = T_prompt + step
-            logits, kv_caches = self(curr_token, kv_caches=kv_caches, pos_offset=pos_offset)
-            logits_step = logits[:, -1, :] / max(1e-5, temperature)
+            logits_step = next_logits / max(1e-5, temperature)
             
             if top_k > 0:
                 v, _ = torch.topk(logits_step, min(top_k, logits_step.size(-1)))
@@ -164,8 +162,11 @@ class MatchedTransformer(nn.Module):
                 
             probs = F.softmax(logits_step, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
-            
             generated.append(next_token)
-            curr_token = next_token
+            
+            # Step forward with newly generated token
+            pos_offset = T_prompt + step
+            logits, kv_caches = self(next_token, kv_caches=kv_caches, pos_offset=pos_offset)
+            next_logits = logits[:, -1, :]
             
         return torch.cat(generated, dim=1)

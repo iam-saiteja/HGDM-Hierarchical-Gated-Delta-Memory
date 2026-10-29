@@ -219,8 +219,12 @@ class TokenizedMHGD(nn.Module):
             else:
                 n_last = None
                 
+            # Compute final state matrix S for recurrent continuation
+            decay_to_end = torch.exp(cumsum_log[:, :, -1:] - cumsum_log) * beta.permute(0, 2, 1)  # [B, H, T]
+            S_final = torch.einsum('bht,bhtk,bhtd->bhkd', decay_to_end, k_p, v_p)
+
             out = (out * out_gate).reshape(B, T, -1)
-            return self.W_o(out), (None, n_last)
+            return self.W_o(out), (S_final, n_last)
             
         # Step-by-Step Recurrent Mode (O(1) Memory Autoregressive Generation)
         else:
@@ -350,16 +354,14 @@ class TokenizedHGDM(nn.Module):
         B, T_prompt = prompt_ids.shape
         device = prompt_ids.device
         
-        # 1. Prime recurrent states over the prompt
-        _, states = self(prompt_ids)
+        # 1. Prime recurrent states over prompt and obtain first token prediction
+        logits, states = self(prompt_ids)
+        next_logits = logits[:, -1, :]
         
-        # 2. Sequential generation loop carrying ONLY states
-        curr_token = prompt_ids[:, -1:]  # [B, 1]
         generated = [prompt_ids]
         
         for _ in range(max_new_tokens):
-            logits, states = self(curr_token, states=states)
-            logits_step = logits[:, -1, :] / max(1e-5, temperature)
+            logits_step = next_logits / max(1e-5, temperature)
             
             if top_k > 0:
                 v, _ = torch.topk(logits_step, min(top_k, logits_step.size(-1)))
@@ -367,8 +369,10 @@ class TokenizedHGDM(nn.Module):
                 
             probs = F.softmax(logits_step, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
-            
             generated.append(next_token)
-            curr_token = next_token
+            
+            # 2. Autoregressive step: forward newly generated token to advance state
+            logits, states = self(next_token, states=states)
+            next_logits = logits[:, -1, :]
             
         return torch.cat(generated, dim=1)
