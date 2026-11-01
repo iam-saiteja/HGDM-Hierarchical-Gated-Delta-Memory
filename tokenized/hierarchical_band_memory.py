@@ -212,15 +212,96 @@ class HierarchicalBandMemory(nn.Module):
         state: Optional[Tuple] = None,
     ) -> Tuple[torch.Tensor, Tuple]:
         """
-        Processes a full sequence x: [B, T, d_model].
+        Processes sequence x: [B, T, d_model].
+        Uses fast parallel vectorized scan when T > 1 (training),
+        and fast O(1) step recurrence when T == 1 (inference).
         """
         B, T, _ = x.shape
-        outputs = []
-        curr_state = state
-        
-        for t in range(T):
-            x_t = x[:, t:t+1]
-            out_t, curr_state = self.forward_step(x_t, state=curr_state)
-            outputs.append(out_t)
+        if T == 1:
+            return self.forward_step(x, state=state)
             
-        return torch.cat(outputs, dim=1), curr_state
+        device = x.device
+        dtype = x.dtype
+        
+        # 1. Projections across full sequence
+        q = self.W_q(x).view(B, T, self.H, self.d_k)
+        k = self.W_k(x).view(B, T, self.H, self.d_k)
+        v = self.W_v(x).view(B, T, self.H, self.d_v)
+        
+        q = F.normalize(q, p=2, dim=-1, eps=1e-6)
+        k = F.normalize(k, p=2, dim=-1, eps=1e-6)
+        
+        out_gate = torch.sigmoid(self.W_out(x)).view(B, T, self.H, self.d_v)
+        router_logits = self.W_router(x).view(B, T, self.H, self.K)
+        
+        # Gates [B, T, H, K]
+        beta_raw = torch.sigmoid(self.W_beta(x)).view(B, T, self.H, self.K)
+        thresh = self.thresholds.unsqueeze(1) # [1, 1, 1, K]
+        beta = (F.relu(beta_raw - thresh) / (1.0 - thresh + 1e-8)) * torch.exp(self.log_beta_scale)[None, None, :, :]
+        
+        delta_raw = self.W_delta(x).view(B, T, self.H, self.K)
+        delta_t = F.softplus(delta_raw) + 1e-3
+        decay_rates = torch.exp(self.band_lambdas).view(1, 1, 1, self.K) # [1, 1, 1, K]
+        alpha = torch.exp(-delta_t * decay_rates).clamp(min=1e-4, max=0.9999) # [B, T, H, K]
+        
+        # 2. Parallel Vectorized Scan for all K bands
+        q_p = q.permute(0, 2, 1, 3) # [B, H, T, d_k]
+        k_p = k.permute(0, 2, 1, 3) # [B, H, T, d_k]
+        v_p = v.permute(0, 2, 1, 3) # [B, H, T, d_v]
+        
+        qk = torch.matmul(q_p, k_p.transpose(-1, -2)) # [B, H, T, T]
+        causal_mask = torch.tril(torch.ones(T, T, device=device, dtype=torch.bool)).unsqueeze(0).unsqueeze(0)
+        
+        band_readouts = []
+        tournament_scores = []
+        final_S_list = []
+        final_n_list = []
+        
+        for k_idx in range(self.K):
+            alpha_k = alpha[:, :, :, k_idx] # [B, T, H]
+            beta_k = beta[:, :, :, k_idx]   # [B, T, H]
+            
+            log_alpha = torch.log(alpha_k.clamp(min=1e-7)).permute(0, 2, 1) # [B, H, T]
+            cumsum_log = torch.cumsum(log_alpha, dim=-1) # [B, H, T]
+            diff = cumsum_log.unsqueeze(-1) - cumsum_log.unsqueeze(-2) # [B, H, T, T]
+            diff = torch.where(causal_mask, diff, torch.full_like(diff, float('-inf')))
+            decay_matrix = torch.exp(diff) * beta_k.permute(0, 2, 1).unsqueeze(-2) # [B, H, T, T]
+            
+            # Recurrent associative output via parallel scan
+            attn = qk * decay_matrix
+            out_k = torch.matmul(attn, v_p).permute(0, 2, 1, 3) # [B, T, H, d_v]
+            
+            if self.config.use_epistemic_gate:
+                n_vec = torch.matmul(decay_matrix, k_p).permute(0, 2, 1, 3) # [B, T, H, d_k]
+                n_norm = n_vec.norm(dim=-1, keepdim=True).clamp(min=1e-4)
+                denom = torch.clamp(n_vec.abs().max(dim=-1, keepdim=True)[0], min=1.0)
+                conf = torch.tanh(n_norm)
+                out_k = (out_k / denom) * conf
+                
+                score_k = torch.sum(q * (n_vec / n_norm), dim=-1) # [B, T, H]
+                tournament_scores.append(score_k)
+                final_n_list.append(n_vec[:, -1])
+            else:
+                tournament_scores.append(torch.zeros(B, T, self.H, device=device, dtype=dtype))
+                
+            band_readouts.append(out_k)
+            
+            # Final state for recurrent continuation
+            decay_to_end = torch.exp(cumsum_log[:, :, -1:] - cumsum_log) * beta_k.permute(0, 2, 1)
+            S_k_final = torch.einsum('bht,bhtk,bhtd->bhkd', decay_to_end, k_p, v_p)
+            final_S_list.append(S_k_final)
+            
+        # 3. Stack and Tournament Convex Combination
+        readouts_stack = torch.stack(band_readouts, dim=3)   # [B, T, H, K, d_v]
+        score_stack = torch.stack(tournament_scores, dim=3)  # [B, T, H, K]
+        
+        weights = F.softmax(router_logits + self.gamma * score_stack, dim=-1) # [B, T, H, K]
+        out_fused = torch.sum(readouts_stack * weights.unsqueeze(-1), dim=3)  # [B, T, H, d_v]
+        out_fused = out_fused * out_gate
+        
+        out = self.W_o(out_fused.reshape(B, T, -1))
+        
+        S_final_stack = torch.stack(final_S_list, dim=1) # [B, K, H, d_k, d_v]
+        n_final_stack = torch.stack(final_n_list, dim=1) if final_n_list else None
+        
+        return out, (S_final_stack, n_final_stack)
