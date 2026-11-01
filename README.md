@@ -17,9 +17,10 @@
 4. [Empirical Experiments](#empirical-experiments)
    - [Experiment 1: 126M Parameter Model on Enwik8](#experiment-1-126m-parameter-model-on-enwik8)
    - [Experiment 2: 1.0 Billion Parameter Scale Model on 1.46B Tokens](#experiment-2-10-billion-parameter-scale-model-on-146b-tokens)
-5. [Repository Structure](#repository-structure)
-6. [Getting Started](#getting-started)
-7. [Citation](#citation)
+5. [Tokenized Natural-Language Arena (HGDM vs. Transformer)](#tokenized-natural-language-arena)
+6. [Repository Structure](#repository-structure)
+7. [Getting Started](#getting-started)
+8. [Citation](#citation)
 
 ---
 
@@ -210,10 +211,36 @@ Probed using the `prompt_512.txt` benchmark to calculate the per-layer average t
 
 ---
 
+## Tokenized Natural-Language Arena
+
+To directly benchmark pure recurrence against standard self-attention under strict compute-optimal conditions, the `tokenized/` suite provides an independent subword-tokenized pipeline:
+
+* **Strictly Matched Scaling (Chinchilla Optimal)**: Both Tokenized HGDM (30.8M) and a Matched Transformer (30.7M) were trained on identical token budgets ($20 \times N_{\text{params}} \approx 614\text{M}$ tokens) using `HuggingFaceTB/smoltalk`.
+* **Zero KV-Cache Advantage**: HGDM maintains a strictly constant **288 KB state per user** ($O(1)$ memory) regardless of context length, achieving a **1,024× memory footprint reduction** at 32k context over the Transformer's growing KV-cache.
+* **Degeneration Resistance**: HGDM's contractive ODE decay acts as a regularizer, avoiding the infinite repetition collapse observed in small Transformers during narrative generation.
+* **Benchmark Details**: Full pretraining, SFT prompt-masking curves, and 6-context stress test logs are preserved in [`tokenized/BENCHMARK_RESULTS.md`](tokenized/BENCHMARK_RESULTS.md).
+
+```bash
+# Run the side-by-side conversational arena
+python tokenized/chat_arena.py
+```
+
+---
+
 ## Repository Structure
 
 ```
 HTSPC-H3/
+├── tokenized/            # Subword-tokenized Chinchilla suite & Conversational Arena
+│   ├── config.py         # Matched model configurations & Chinchilla calculator
+│   ├── model_hgdm.py     # Tokenized HGDM with O(1) state generation
+│   ├── model_transformer.py # Matched Baseline Transformer (FlashAttention-2, KV-cache)
+│   ├── train.py          # Pretraining script (AdamW, Cosine LR, telemetry)
+│   ├── train_sft.py      # Prompt-masked Supervised Fine-Tuning pipeline
+│   ├── chat_arena.py     # Interactive side-by-side conversational terminal
+│   ├── run_comprehensive_arena.py # 6-context stress testing suite
+│   ├── benchmark_context.py # Context length memory scaling benchmark
+│   └── BENCHMARK_RESULTS.md # Complete empirical pretraining & SFT benchmark log
 ├── hgdm_omega.py         # Main HGDM Model Class (HTD, Broadcaster, Highways)
 ├── ultimate/
 │   └── hgdm_ultimate.py  # Layer components (RMSNorm, SwiGLU, MultiHeadGatedDelta)
