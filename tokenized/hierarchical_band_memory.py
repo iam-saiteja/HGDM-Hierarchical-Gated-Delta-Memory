@@ -9,7 +9,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple
 from dataclasses import dataclass
 
 
@@ -19,11 +19,10 @@ class HBSConfig:
     n_heads: int = 6
     d_k: int = 64
     d_v: int = 64
-    n_bands: int = 4              # Dyadic bands: 2^0, 2^1, 2^2, 2^3 -> [1, 2, 4, 8]
-    strides: Tuple[int, ...] = (1, 2, 4, 8)
-    base_taus: Tuple[float, ...] = (8.0, 32.0, 128.0, 10000.0) # Timescales per band
+    n_bands: int = 4                           # Dyadic bands: 2^0, 2^1, 2^2, 2^3
+    base_taus: Tuple[float, ...] = (8.0, 32.0, 128.0, 10000.0) # Multi-timescale priors
+    band_thresholds: Tuple[float, ...] = (0.10, 0.25, 0.50, 0.75) # Hierarchical write thresholds
     use_epistemic_gate: bool = True
-    sparse_write_threshold: float = 0.15
 
 
 class HierarchicalBandMemory(nn.Module):
@@ -39,7 +38,6 @@ class HierarchicalBandMemory(nn.Module):
         self.d_v = config.d_v
         self.d_model = config.d_model
         self.K = config.n_bands
-        self.strides = config.strides
         
         # Projections
         self.W_q = nn.Linear(config.d_model, self.H * self.d_k, bias=False)
@@ -47,23 +45,30 @@ class HierarchicalBandMemory(nn.Module):
         self.W_v = nn.Linear(config.d_model, self.H * self.d_v, bias=False)
         self.W_o = nn.Linear(self.H * self.d_v, config.d_model, bias=False)
         
-        # Gates
+        # Hierarchical gates
         self.W_beta = nn.Linear(config.d_model, self.H * self.K, bias=True)
         self.W_out  = nn.Linear(config.d_model, self.H * self.d_v, bias=True)
         self.W_router = nn.Linear(config.d_model, self.H * self.K, bias=True)
         
-        # Learnable multi-timescale decay prior for each band
-        # Band 0: fast (tau ~ 8)
-        # Band 1: medium (tau ~ 32)
-        # Band 2: slow (tau ~ 128)
-        # Band 3: permanent anchor (tau ~ 10,000, zero decay)
+        # Continuous multi-timescale decay priors:
+        # Band 0: fast local syntax (tau ~ 8 tokens)
+        # Band 1: clause / phrases (tau ~ 32 tokens)
+        # Band 2: sentence discourse (tau ~ 128 tokens)
+        # Band 3: permanent episodic anchor (tau ~ 10,000 tokens, alpha ~ 0.9999)
         lambdas = [1.0 / max(1.0, tau) for tau in config.base_taus]
+        log_lambdas = [math.log(l) for l in lambdas]
         self.band_lambdas = nn.Parameter(
-            torch.tensor(lambdas, dtype=torch.float32).view(1, 1, self.K, 1) # [1, 1, K, 1]
+            torch.tensor(log_lambdas, dtype=torch.float32).view(1, 1, self.K, 1) # [1, 1, K, 1]
         )
         
         self.W_delta = nn.Linear(config.d_model, self.H * self.K, bias=True)
         self.log_beta_scale = nn.Parameter(torch.zeros(self.H, self.K))
+        
+        # Register hierarchical write thresholds
+        self.register_buffer(
+            "thresholds",
+            torch.tensor(config.band_thresholds, dtype=torch.float32).view(1, 1, self.K)
+        )
         
         self._init_weights()
 
@@ -90,25 +95,21 @@ class HierarchicalBandMemory(nn.Module):
         Allocates the O(1) multi-scale state hierarchy:
         - S_bands: [B, K, H, d_k, d_v]
         - n_bands: [B, K, H, d_k]
-        - accum_k: list of [B, H, d_k] per band
-        - accum_v: list of [B, H, d_v] per band
-        - step_counter: int
         """
         S = torch.zeros(batch_size, self.K, self.H, self.d_k, self.d_v, device=device, dtype=dtype)
-        n = torch.zeros(batch_size, self.K, self.H, self.d_k, device=device, dtype=dtype)
-        accum_k = [torch.zeros(batch_size, self.H, self.d_k, device=device, dtype=dtype) for _ in range(self.K)]
-        accum_v = [torch.zeros(batch_size, self.H, self.d_v, device=device, dtype=dtype) for _ in range(self.K)]
-        step_counter = 0
-        return (S, n, accum_k, accum_v, step_counter)
+        n = torch.zeros(batch_size, self.K, self.H, self.d_k, device=device, dtype=dtype) if self.config.use_epistemic_gate else None
+        return (S, n)
 
     def forward_step(
         self,
         x: torch.Tensor,
         state: Optional[Tuple] = None,
+        is_query_only: bool = False,
     ) -> Tuple[torch.Tensor, Tuple]:
         """
         Single-step pure O(1) recurrent forward (T=1).
         x: [B, 1, d_model]
+        is_query_only: if True, reads from state without updating (inference query step).
         """
         B, T, _ = x.shape
         assert T == 1, "forward_step expects T=1"
@@ -118,8 +119,7 @@ class HierarchicalBandMemory(nn.Module):
         if state is None:
             state = self.init_state(B, device, dtype)
             
-        S_bands, n_bands, accum_k, accum_v, step = state
-        step += 1
+        S_bands, n_bands = state
         
         # 1. Projections
         q = self.W_q(x).view(B, self.H, self.d_k)
@@ -134,77 +134,60 @@ class HierarchicalBandMemory(nn.Module):
         # Router logits: [B, H, K]
         router_logits = self.W_router(x).view(B, self.H, self.K)
         
-        # Multi-band beta write gates: [B, H, K]
+        # Multi-band beta write gates with hierarchical filtering: [B, H, K]
         beta_raw = torch.sigmoid(self.W_beta(x)).view(B, self.H, self.K)
-        thresh = self.config.sparse_write_threshold
+        thresh = self.thresholds # [1, 1, K]
         beta = (F.relu(beta_raw - thresh) / (1.0 - thresh + 1e-8)) * torch.exp(self.log_beta_scale)[None, :, :]
         
+        if is_query_only:
+            beta = torch.zeros_like(beta)
+            
         # Multi-band alpha decay gates: [B, H, K]
         delta_raw = self.W_delta(x).view(B, self.H, self.K)
         delta_t = F.softplus(delta_raw) + 1e-3
         decay_rates = torch.exp(self.band_lambdas).squeeze(-1) # [1, 1, K]
         alpha = torch.exp(-delta_t * decay_rates).clamp(min=1e-4, max=0.9999) # [B, H, K]
         
-        # 2. Update each dyadic band in the hierarchy
-        # Band readouts
+        # 2. Read from current state and compute updates
+        delta_t_k = torch.einsum('bhk,bhd->bhkd', k, v) # [B, H, d_k, d_v]
+        
         band_readouts = []
         band_confidences = []
         
         S_new = S_bands.clone()
-        n_new = n_bands.clone()
+        n_new = n_bands.clone() if n_bands is not None else None
         
-        for k_idx, stride in enumerate(self.strides):
-            # Accumulate token features for this band
-            accum_k[k_idx] = accum_k[k_idx] + k
-            accum_v[k_idx] = accum_v[k_idx] + v
-            
-            # Check if this dyadic stride triggers a commit
-            if step % stride == 0:
-                # Scaled dyadic block update
-                scale = 1.0 / math.sqrt(stride)
-                k_block = accum_k[k_idx] * scale
-                v_block = accum_v[k_idx] * scale
-                
-                # Outer product delta
-                delta_block = torch.einsum('bhk,bhd->bhkd', k_block, v_block)
-                a_k = alpha[:, :, k_idx, None, None]
-                b_k = beta[:, :, k_idx, None, None]
-                
-                # Recurrent matrix update
-                S_new[:, k_idx] = a_k * S_bands[:, k_idx] + b_k * delta_block
-                
-                # Epistemic normalizer vector update
-                if self.config.use_epistemic_gate:
-                    n_new[:, k_idx] = (
-                        alpha[:, :, k_idx, None] * n_bands[:, k_idx] +
-                        beta[:, :, k_idx, None] * k_block
-                    )
-                
-                # Reset accumulators
-                accum_k[k_idx].zero_()
-                accum_v[k_idx].zero_()
-                
-            # Readout from current band state
-            # out_k = S^{(k)} * q
-            o_k = torch.einsum('bhkd,bhk->bhd', S_new[:, k_idx], q)
+        for k_idx in range(self.K):
+            # Readout: out_k = S^{(k)} * q
+            o_k = torch.einsum('bhkd,bhk->bhd', S_bands[:, k_idx], q)
             
             # Confidence normalizer
-            if self.config.use_epistemic_gate:
-                n_curr = n_new[:, k_idx]
+            if self.config.use_epistemic_gate and n_bands is not None:
+                n_curr = n_bands[:, k_idx]
                 n_inf = n_curr.abs().max(dim=-1)[0]
                 denom = torch.clamp(n_inf, min=1.0).unsqueeze(-1)
                 conf = torch.tanh(n_curr.norm(dim=-1)).unsqueeze(-1)
                 o_k = (o_k / denom) * conf
-                band_confidences.append(conf.squeeze(-1)) # [B, H]
+                band_confidences.append(conf.squeeze(-1))
             else:
                 band_confidences.append(torch.ones(B, self.H, device=device, dtype=dtype))
                 
-            band_readouts.append(o_k) # [B, H, d_v]
+            band_readouts.append(o_k)
             
+            # Update state for next step
+            a_k = alpha[:, :, k_idx, None, None]
+            b_k = beta[:, :, k_idx, None, None]
+            S_new[:, k_idx] = a_k * S_bands[:, k_idx] + b_k * delta_t_k
+            
+            if self.config.use_epistemic_gate and n_bands is not None:
+                n_new[:, k_idx] = (
+                    alpha[:, :, k_idx, None] * n_bands[:, k_idx] +
+                    beta[:, :, k_idx, None] * k
+                )
+                
         # 3. Hierarchical Band Search Tournament Readout
-        # Stack readouts: [B, H, K, d_v]
-        readouts_stack = torch.stack(band_readouts, dim=2)
-        conf_stack = torch.stack(band_confidences, dim=2) # [B, H, K]
+        readouts_stack = torch.stack(band_readouts, dim=2) # [B, H, K, d_v]
+        conf_stack = torch.stack(band_confidences, dim=2)  # [B, H, K]
         
         # Tournament weights combine router prediction and epistemic confidence
         weights = F.softmax(router_logits + 0.5 * torch.log(conf_stack.clamp(min=1e-5)), dim=-1) # [B, H, K]
@@ -213,10 +196,8 @@ class HierarchicalBandMemory(nn.Module):
         out_fused = torch.sum(readouts_stack * weights.unsqueeze(-1), dim=2)
         out_fused = out_fused * out_gate
         
-        # Out projection: [B, 1, d_model]
         out = self.W_o(out_fused.reshape(B, -1)).unsqueeze(1)
-        next_state = (S_new, n_new, accum_k, accum_v, step)
-        
+        next_state = (S_new, n_new)
         return out, next_state
 
     def forward(
@@ -226,7 +207,6 @@ class HierarchicalBandMemory(nn.Module):
     ) -> Tuple[torch.Tensor, Tuple]:
         """
         Processes a full sequence x: [B, T, d_model].
-        Unrolls recurrent dyadic bands step-by-step to guarantee identical state tracking.
         """
         B, T, _ = x.shape
         outputs = []
