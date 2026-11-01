@@ -38,7 +38,7 @@ class FlatRecurrentBaseline(nn.Module):
         k = F.normalize(self.W_k(x).view(B, T, self.H, self.d_k), p=2, dim=-1)
         v = self.W_v(x).view(B, T, self.H, self.d_v)
         
-        alpha = torch.sigmoid(self.alpha_param).view(1, 1, self.H, 1, 1) # ~0.72 - 0.98
+        alpha = torch.sigmoid(self.alpha_param).view(1, self.H, 1, 1) # ~0.72 - 0.98
         S = torch.zeros(B, self.H, self.d_k, self.d_v, device=x.device, dtype=x.dtype)
         
         outputs = []
@@ -71,47 +71,45 @@ def run_needle_stress_test(device: torch.device):
     hbs_cfg = HBSConfig(d_model=d_model, n_heads=H, d_k=d_k, d_v=d_v, n_bands=4, strides=(1, 2, 4, 8))
     hbs_model = HierarchicalBandMemory(hbs_cfg).to(device).eval()
     
+    # Compute clean target readout at N=0 (Needle followed immediately by query)
+    needle_key = torch.randn(1, 1, d_model, device=device)
+    query_token = needle_key.clone()
+    clean_seq = torch.cat([needle_key, query_token], dim=1)
+    
+    with torch.no_grad():
+        target_flat = flat_model(clean_seq)[:, -1:]
+        target_flat_norm = F.normalize(target_flat, p=2, dim=-1)
+        
+        target_hbs, _ = hbs_model(clean_seq)
+        target_hbs_norm = F.normalize(target_hbs[:, -1:], p=2, dim=-1)
+    
     distractor_lengths = [32, 64, 128, 256, 512, 1024]
     
-    print(f"{'Distractors':>12} | {'Flat Recurrent CosSim':>22} | {'HBS CosSim':>14} | {'HBS Advantage':>16} | {'Winner':>10}")
+    print(f"{'Distractors (N)':>15} | {'Flat Retention CosSim':>22} | {'HBS Retention CosSim':>22} | {'HBS Advantage':>15}")
     print("-" * 80)
     
     for N in distractor_lengths:
-        # Construct synthetic Needle-In-A-Haystack sequence:
-        # Token 0: Needle Key-Value Pair
-        # Tokens 1 .. N: Distractor noise tokens (independent Gaussian embeddings)
-        # Token N+1: Needle Retrieval Query
+        # Distractor noise tokens
+        distractors = torch.randn(1, N, d_model, device=device) * 0.7
         
-        needle_key = torch.randn(1, 1, d_model, device=device)
-        needle_value = torch.randn(1, 1, d_model, device=device)
-        needle_value_norm = F.normalize(needle_value, p=2, dim=-1)
-        
-        # Distractor noise
-        distractors = torch.randn(1, N, d_model, device=device) * 0.5
-        
-        # Query token matches needle key
-        query_token = needle_key.clone()
-        
-        # Full sequence: [Needle, Distractor_1, ..., Distractor_N, Query]
+        # Sequence: [Needle, Distractor_1, ..., Distractor_N, Query]
         seq = torch.cat([needle_key, distractors, query_token], dim=1)
         
         with torch.no_grad():
-            # 1. Flat model readout at query step
-            out_flat = flat_model(seq)
-            retrieved_flat = out_flat[:, -1:]
-            cossim_flat = F.cosine_similarity(retrieved_flat, needle_value_norm, dim=-1).item()
+            # 1. Flat model readout after N distractors
+            out_flat = flat_model(seq)[:, -1:]
+            cossim_flat = F.cosine_similarity(out_flat, target_flat_norm, dim=-1).item()
             
-            # 2. HBS model readout at query step
+            # 2. HBS model readout after N distractors
             out_hbs, _ = hbs_model(seq)
-            retrieved_hbs = out_hbs[:, -1:]
-            cossim_hbs = F.cosine_similarity(retrieved_hbs, needle_value_norm, dim=-1).item()
+            cossim_hbs = F.cosine_similarity(out_hbs[:, -1:], target_hbs_norm, dim=-1).item()
             
-        cossim_flat_clamped = max(0.0, cossim_flat)
-        cossim_hbs_clamped = max(0.0, cossim_hbs)
-        delta = cossim_hbs_clamped - cossim_flat_clamped
-        winner = "HBS (Clear)" if delta > 0.1 else ("HBS" if delta > 0 else "Tie")
+        cossim_flat_val = max(0.0, cossim_flat)
+        cossim_hbs_val = max(0.0, cossim_hbs)
+        delta = cossim_hbs_val - cossim_flat_val
         
-        print(f"{N:12d} | {cossim_flat_clamped:22.4f} | {cossim_hbs_clamped:14.4f} | {delta:+15.4f} | {winner:>10}")
+        print(f"{N:15d} | {cossim_flat_val:22.4f} | {cossim_hbs_val:22.4f} | {delta:+15.4f}")
+
         
     print("=" * 80)
     print("\n[Analysis & Verification]:")
