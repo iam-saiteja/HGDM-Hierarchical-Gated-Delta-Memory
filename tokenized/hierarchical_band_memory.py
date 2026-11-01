@@ -21,8 +21,9 @@ class HBSConfig:
     d_v: int = 64
     n_bands: int = 4                           # Dyadic bands: 2^0, 2^1, 2^2, 2^3
     base_taus: Tuple[float, ...] = (8.0, 32.0, 128.0, 10000.0) # Multi-timescale priors
-    band_thresholds: Tuple[float, ...] = (0.10, 0.25, 0.50, 0.75) # Hierarchical write thresholds
+    band_thresholds: Tuple[float, ...] = (0.05, 0.10, 0.15, 0.20) # Hierarchical write thresholds
     use_epistemic_gate: bool = True
+    tournament_scale: float = 5.0
 
 
 class HierarchicalBandMemory(nn.Module):
@@ -63,6 +64,7 @@ class HierarchicalBandMemory(nn.Module):
         
         self.W_delta = nn.Linear(config.d_model, self.H * self.K, bias=True)
         self.log_beta_scale = nn.Parameter(torch.zeros(self.H, self.K))
+        self.gamma = nn.Parameter(torch.tensor(config.tournament_scale))
         
         # Register hierarchical write thresholds
         self.register_buffer(
@@ -152,7 +154,7 @@ class HierarchicalBandMemory(nn.Module):
         delta_t_k = torch.einsum('bhk,bhd->bhkd', k, v) # [B, H, d_k, d_v]
         
         band_readouts = []
-        band_confidences = []
+        tournament_scores = []
         
         S_new = S_bands.clone()
         n_new = n_bands.clone() if n_bands is not None else None
@@ -161,16 +163,20 @@ class HierarchicalBandMemory(nn.Module):
             # Readout: out_k = S^{(k)} * q
             o_k = torch.einsum('bhkd,bhk->bhd', S_bands[:, k_idx], q)
             
-            # Confidence normalizer
+            # Tournament key alignment score: q^T n^{(k)} / (||n^{(k)}|| + 1e-4)
             if self.config.use_epistemic_gate and n_bands is not None:
                 n_curr = n_bands[:, k_idx]
+                n_norm = n_curr.norm(dim=-1, keepdim=True).clamp(min=1e-4)
+                n_unit = n_curr / n_norm
+                score_k = torch.sum(q * n_unit, dim=-1) # [B, H]
+                
                 n_inf = n_curr.abs().max(dim=-1)[0]
                 denom = torch.clamp(n_inf, min=1.0).unsqueeze(-1)
-                conf = torch.tanh(n_curr.norm(dim=-1)).unsqueeze(-1)
-                o_k = (o_k / denom) * conf
-                band_confidences.append(conf.squeeze(-1))
+                conf = torch.tanh(n_norm).squeeze(-1)
+                o_k = (o_k / denom) * conf.unsqueeze(-1)
+                tournament_scores.append(score_k)
             else:
-                band_confidences.append(torch.ones(B, self.H, device=device, dtype=dtype))
+                tournament_scores.append(torch.zeros(B, self.H, device=device, dtype=dtype))
                 
             band_readouts.append(o_k)
             
@@ -186,11 +192,11 @@ class HierarchicalBandMemory(nn.Module):
                 )
                 
         # 3. Hierarchical Band Search Tournament Readout
-        readouts_stack = torch.stack(band_readouts, dim=2) # [B, H, K, d_v]
-        conf_stack = torch.stack(band_confidences, dim=2)  # [B, H, K]
+        readouts_stack = torch.stack(band_readouts, dim=2)   # [B, H, K, d_v]
+        score_stack = torch.stack(tournament_scores, dim=2)  # [B, H, K]
         
-        # Tournament weights combine router prediction and epistemic confidence
-        weights = F.softmax(router_logits + 0.5 * torch.log(conf_stack.clamp(min=1e-5)), dim=-1) # [B, H, K]
+        # Tournament weights combine learned router with dynamic key-alignment
+        weights = F.softmax(router_logits + self.gamma * score_stack, dim=-1) # [B, H, K]
         
         # Convex combination across bands: [B, H, d_v]
         out_fused = torch.sum(readouts_stack * weights.unsqueeze(-1), dim=2)
