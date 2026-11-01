@@ -29,16 +29,20 @@ class CUDAGraphedHGDM:
         # 1. Allocate static buffers on GPU
         self.static_token = torch.zeros(1, 1, dtype=torch.long, device=device)
         self.static_states: List[Tuple[torch.Tensor, Optional[torch.Tensor]]] = []
-        for _ in range(self.config.n_layers):
-            s = torch.zeros(
-                1, self.config.n_heads, self.config.d_k, self.config.d_v,
-                device=device, dtype=torch.bfloat16
-            )
-            n = (
-                torch.zeros(1, self.config.n_heads, self.config.d_k, device=device, dtype=torch.bfloat16)
-                if self.config.use_epistemic_gate else None
-            )
-            self.static_states.append((s, n))
+        for layer in self.model.layers:
+            if hasattr(layer.mixer, "init_state"):
+                s = layer.mixer.init_state(1, device, dtype=torch.bfloat16)
+            else:
+                s_mat = torch.zeros(
+                    1, self.config.n_heads, self.config.d_k, self.config.d_v,
+                    device=device, dtype=torch.bfloat16
+                )
+                n_vec = (
+                    torch.zeros(1, self.config.n_heads, self.config.d_k, device=device, dtype=torch.bfloat16)
+                    if self.config.use_epistemic_gate else None
+                )
+                s = (s_mat, n_vec)
+            self.static_states.append(s)
             
         self.static_logits = torch.zeros(
             1, 1, self.config.vocab_size, device=device, dtype=torch.bfloat16

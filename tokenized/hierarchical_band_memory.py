@@ -92,6 +92,47 @@ class HierarchicalBandMemory(nn.Module):
         nn.init.zeros_(self.W_delta.weight)
         nn.init.constant_(self.W_delta.bias, 0.5413)
 
+    def fuse_projections(self):
+        """
+        Fuses W_q, W_k, W_v, W_out, W_beta, W_router, W_delta into a single GEMM projection W_in.
+        """
+        d_q = self.H * self.d_k
+        d_k_proj = self.H * self.d_k
+        d_v_proj = self.H * self.d_v
+        d_out = self.H * self.d_v
+        d_beta = self.H * self.K
+        d_router = self.H * self.K
+        d_delta = self.H * self.K
+        
+        total_dim = d_q + d_k_proj + d_v_proj + d_out + d_beta + d_router + d_delta
+        dev = self.W_q.weight.device
+        dtype = self.W_q.weight.dtype
+        
+        W_in = nn.Linear(self.d_model, total_dim, bias=True, device=dev, dtype=dtype)
+        with torch.no_grad():
+            W_in.weight.copy_(torch.cat([
+                self.W_q.weight,
+                self.W_k.weight,
+                self.W_v.weight,
+                self.W_out.weight,
+                self.W_beta.weight,
+                self.W_router.weight,
+                self.W_delta.weight,
+            ], dim=0))
+            
+            W_in.bias.copy_(torch.cat([
+                torch.zeros(d_q, device=dev, dtype=dtype),
+                torch.zeros(d_k_proj, device=dev, dtype=dtype),
+                torch.zeros(d_v_proj, device=dev, dtype=dtype),
+                self.W_out.bias,
+                self.W_beta.bias,
+                self.W_router.bias,
+                self.W_delta.bias,
+            ], dim=0))
+            
+        self.W_in = W_in
+        self.is_fused = True
+
     def init_state(self, batch_size: int, device: torch.device, dtype: torch.dtype = torch.bfloat16):
         """
         Allocates the O(1) multi-scale state hierarchy:
@@ -124,20 +165,31 @@ class HierarchicalBandMemory(nn.Module):
         S_bands, n_bands = state
         
         # 1. Projections
-        q = self.W_q(x).view(B, self.H, self.d_k)
-        k = self.W_k(x).view(B, self.H, self.d_k)
-        v = self.W_v(x).view(B, self.H, self.d_v)
-        
-        q = F.normalize(q, p=2, dim=-1, eps=1e-6)
-        k = F.normalize(k, p=2, dim=-1, eps=1e-6)
-        
-        out_gate = torch.sigmoid(self.W_out(x)).view(B, self.H, self.d_v)
-        
-        # Router logits: [B, H, K]
-        router_logits = self.W_router(x).view(B, self.H, self.K)
-        
-        # Multi-band beta write gates with hierarchical filtering: [B, H, K]
-        beta_raw = torch.sigmoid(self.W_beta(x)).view(B, self.H, self.K)
+        if getattr(self, "is_fused", False):
+            in_proj = self.W_in(x) # [B, 1, total_dim]
+            q, k, v, out_raw, beta_raw, router_raw, delta_raw = torch.split(
+                in_proj,
+                [self.H * self.d_k, self.H * self.d_k, self.H * self.d_v, self.H * self.d_v,
+                 self.H * self.K, self.H * self.K, self.H * self.K],
+                dim=-1
+            )
+            q = F.normalize(q.view(B, self.H, self.d_k), p=2, dim=-1, eps=1e-6)
+            k = F.normalize(k.view(B, self.H, self.d_k), p=2, dim=-1, eps=1e-6)
+            v = v.view(B, self.H, self.d_v)
+            out_gate = torch.sigmoid(out_raw).view(B, self.H, self.d_v)
+            router_logits = router_raw.view(B, self.H, self.K)
+            beta_raw = torch.sigmoid(beta_raw).view(B, self.H, self.K)
+            delta_raw = delta_raw.view(B, self.H, self.K)
+        else:
+            q = self.W_q(x).view(B, self.H, self.d_k)
+            k = self.W_k(x).view(B, self.H, self.d_k)
+            v = self.W_v(x).view(B, self.H, self.d_v)
+            q = F.normalize(q, p=2, dim=-1, eps=1e-6)
+            k = F.normalize(k, p=2, dim=-1, eps=1e-6)
+            out_gate = torch.sigmoid(self.W_out(x)).view(B, self.H, self.d_v)
+            router_logits = self.W_router(x).view(B, self.H, self.K)
+            beta_raw = torch.sigmoid(self.W_beta(x)).view(B, self.H, self.K)
+            delta_raw = self.W_delta(x).view(B, self.H, self.K)
         thresh = self.thresholds # [1, 1, K]
         beta = (F.relu(beta_raw - thresh) / (1.0 - thresh + 1e-8)) * torch.exp(self.log_beta_scale)[None, :, :]
         
