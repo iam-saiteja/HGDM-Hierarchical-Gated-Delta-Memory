@@ -346,7 +346,18 @@ class TokenizedHGDMLayer(nn.Module):
     def __init__(self, config: TokenizedConfig, layer_idx: int):
         super().__init__()
         self.norm1 = RMSNorm(config.d_model)
-        self.mixer = TokenizedMHGD(config, layer_idx)
+        if getattr(config, "use_hbs", False):
+            from tokenized.hierarchical_band_memory import HierarchicalBandMemory, HBSConfig
+            hbs_cfg = HBSConfig(
+                d_model=config.d_model,
+                n_heads=config.n_heads,
+                d_k=config.d_k,
+                d_v=config.d_v,
+                n_bands=getattr(config, "hbs_n_bands", 4),
+            )
+            self.mixer = HierarchicalBandMemory(hbs_cfg)
+        else:
+            self.mixer = TokenizedMHGD(config, layer_idx)
         self.norm2 = RMSNorm(config.d_model)
         self.mlp = SwiGLU(config.d_model, config.d_ff, dropout=config.dropout)
 

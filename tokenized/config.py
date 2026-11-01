@@ -20,6 +20,8 @@ class TokenizedConfig:
     use_epistemic_gate: bool = True     # State confidence gating via tanh(||n||)
     sparse_write_threshold: float = 0.1 # Sparsity threshold for ReLU beta gate
     chunk_size: int = 32                # Nitro parallel scan tile size (GPU SRAM)
+    use_hbs: bool = False               # Enable Hierarchical Band Search (dyadic powers of two)
+    hbs_n_bands: int = 4                # Number of dyadic bands (strides 2^0, 2^1, 2^2, 2^3)
     
     # Chinchilla scaling configuration
     # Optimal tokens ~= 20 * parameters
