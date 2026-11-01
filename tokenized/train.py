@@ -181,6 +181,7 @@ def main():
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--max_tokens", type=int, default=None, help="Override Chinchilla target tokens")
     parser.add_argument("--save_dir", type=str, default="checkpoints_tokenized")
+    parser.add_argument("--use_hbs", action="store_true", default=False, help="Enable Hierarchical Band Search (HBS)")
     args = parser.parse_args()
     
     # 1. Resolve Config
@@ -189,6 +190,7 @@ def main():
     vocab_size = tok.vocab_size
     
     config = TokenizedConfig.get_tier(args.tier, vocab_size=vocab_size)
+    config.use_hbs = args.use_hbs
     
     print("=" * 70)
     print("CHINCHILLA TOKENIZED ARENA: HGDM vs. TRANSFORMER")
