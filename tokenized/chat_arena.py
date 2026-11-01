@@ -65,7 +65,8 @@ def main():
     parser.add_argument("--tokenizer", type=str, default="gpt2")
     parser.add_argument("--max_new_tokens", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--prompt", type=str, default=None, help="One-shot prompt to evaluate")
+    parser.add_argument("--cuda_graph", action="store_true", default=True, help="Accelerate HGDM with CUDA Graphs and fused GEMM")
+    parser.add_argument("--no_cuda_graph", dest="cuda_graph", action="store_false", help="Disable CUDA Graphs and use eager PyTorch")
     args = parser.parse_args()
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -80,6 +81,13 @@ def main():
     trans, cfg_t = load_model(args.transformer_ckpt, "transformer", device)
     hgdm.eval()
     trans.eval()
+    
+    graphed_hgdm = None
+    if args.cuda_graph and device.type == "cuda":
+        print("[Optimization] Fusing GEMM projections and capturing CUDA Graph for HGDM...")
+        hgdm.fuse_projections()
+        graphed_hgdm = hgdm.to_cuda_graph(device)
+
     
     print("\n" + "=" * 75)
     print("      NATURAL-LANGUAGE CONVERSATIONAL ARENA: HGDM vs. TRANSFORMER")
@@ -102,9 +110,10 @@ def main():
         formatted_prompt = f"User: {user_input}\nAssistant:"
         prompt_ids = torch.tensor([tokenizer.encode(formatted_prompt)], device=device)
         
-        # 1. HGDM Generation
+        # 1. HGDM Generation (using CUDA Graph pulse engine if enabled)
+        active_hgdm = graphed_hgdm if graphed_hgdm is not None else hgdm
         out_h, speed_h, vram_h = generate_with_metrics(
-            hgdm, "hgdm", prompt_ids, max_new_tokens=args.max_new_tokens, temperature=args.temperature
+            active_hgdm, "hgdm", prompt_ids, max_new_tokens=args.max_new_tokens, temperature=args.temperature
         )
         resp_h = tokenizer.decode(out_h[0, prompt_ids.shape[1]:], skip_special_tokens=True)
         

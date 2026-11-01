@@ -116,6 +116,47 @@ class TokenizedMHGD(nn.Module):
             nn.init.zeros_(self.W_alpha.weight)
             nn.init.constant_(self.W_alpha.bias, 2.0)
 
+    def fuse_projections(self):
+        """
+        Fuses W_q, W_k, W_v, W_beta, W_delta/W_alpha, W_out into a single GEMM projection W_in.
+        """
+        d_q = self.H * self.d_k
+        d_k_proj = self.H * self.d_k
+        d_v_proj = self.H * self.d_v
+        d_beta = self.H
+        d_delta = self.H
+        d_out = self.H * self.d_v
+        
+        total_dim = d_q + d_k_proj + d_v_proj + d_beta + d_delta + d_out
+        dev = self.W_q.weight.device
+        dtype = self.W_q.weight.dtype
+        
+        W_in = nn.Linear(self.d_model, total_dim, bias=True, device=dev, dtype=dtype)
+        with torch.no_grad():
+            w_delta_w = self.W_delta.weight if self.config.use_variable_delta_t else self.W_alpha.weight
+            w_delta_b = self.W_delta.bias if self.config.use_variable_delta_t else self.W_alpha.bias
+            
+            W_in.weight.copy_(torch.cat([
+                self.W_q.weight,
+                self.W_k.weight,
+                self.W_v.weight,
+                self.W_beta.weight,
+                w_delta_w,
+                self.W_out.weight
+            ], dim=0))
+            
+            W_in.bias.copy_(torch.cat([
+                torch.zeros(d_q, device=dev, dtype=dtype),
+                torch.zeros(d_k_proj, device=dev, dtype=dtype),
+                torch.zeros(d_v_proj, device=dev, dtype=dtype),
+                self.W_beta.bias,
+                w_delta_b,
+                self.W_out.bias
+            ], dim=0))
+            
+        self.W_in = W_in
+        self.is_fused = True
+
     def forward(
         self,
         x: torch.Tensor,
@@ -133,31 +174,53 @@ class TokenizedMHGD(nn.Module):
         """
         B, T, _ = x.shape
         
-        # 1. Project Q, K, V
-        q = self.W_q(x).view(B, T, self.H, self.d_k)
-        k = self.W_k(x).view(B, T, self.H, self.d_k)
-        v = self.W_v(x).view(B, T, self.H, self.d_v)
-        
-        # QK-Norm: Project q and k to unit sphere
-        q = F.normalize(q, p=2, dim=-1, eps=1e-6)
-        k = F.normalize(k, p=2, dim=-1, eps=1e-6)
-        
-        # 2. Gates
-        # Output gate
-        out_gate = torch.sigmoid(self.W_out(x)).view(B, T, self.H, self.d_v)
-        
-        # Sparse Write gate beta: Shifted ReLU for 10-20% write sparsity
-        beta_raw = torch.sigmoid(self.W_beta(x))
-        thresh = self.config.sparse_write_threshold
-        beta = (F.relu(beta_raw - thresh) / (1.0 - thresh + 1e-8)) * torch.exp(self.log_beta_scale)[None, None, :]
-        
-        # Continuous Decay gate alpha: exp(-Delta_t * lambda_h)
-        if self.config.use_variable_delta_t:
-            delta_t = F.softplus(self.W_delta(x)) + 1e-3
-            decay_rate = torch.exp(self.W_lambda)[None, None, :]
-            alpha = torch.exp(-delta_t * decay_rate).clamp(min=1e-4, max=0.9999)
+        if getattr(self, "is_fused", False) and T == 1:
+            in_proj = self.W_in(x)
+            q, k, v, beta_raw, delta_raw, out_gate_raw = torch.split(
+                in_proj,
+                [self.H * self.d_k, self.H * self.d_k, self.H * self.d_v, self.H, self.H, self.H * self.d_v],
+                dim=-1
+            )
+            q = F.normalize(q.view(B, 1, self.H, self.d_k), p=2, dim=-1, eps=1e-6)
+            k = F.normalize(k.view(B, 1, self.H, self.d_k), p=2, dim=-1, eps=1e-6)
+            v = v.view(B, 1, self.H, self.d_v)
+            out_gate = torch.sigmoid(out_gate_raw).view(B, 1, self.H, self.d_v)
+            
+            thresh = self.config.sparse_write_threshold
+            beta = (F.relu(torch.sigmoid(beta_raw) - thresh) / (1.0 - thresh + 1e-8)) * torch.exp(self.log_beta_scale)[None, None, :]
+            
+            if self.config.use_variable_delta_t:
+                delta_t = F.softplus(delta_raw) + 1e-3
+                decay_rate = torch.exp(self.W_lambda)[None, None, :]
+                alpha = torch.exp(-delta_t * decay_rate).clamp(min=1e-4, max=0.9999)
+            else:
+                alpha = torch.sigmoid(delta_raw).clamp(min=1e-4, max=0.9999)
         else:
-            alpha = torch.sigmoid(self.W_alpha(x)).clamp(min=1e-4, max=0.9999)
+            # 1. Project Q, K, V
+            q = self.W_q(x).view(B, T, self.H, self.d_k)
+            k = self.W_k(x).view(B, T, self.H, self.d_k)
+            v = self.W_v(x).view(B, T, self.H, self.d_v)
+            
+            # QK-Norm: Project q and k to unit sphere
+            q = F.normalize(q, p=2, dim=-1, eps=1e-6)
+            k = F.normalize(k, p=2, dim=-1, eps=1e-6)
+            
+            # 2. Gates
+            # Output gate
+            out_gate = torch.sigmoid(self.W_out(x)).view(B, T, self.H, self.d_v)
+            
+            # Sparse Write gate beta: Shifted ReLU for 10-20% write sparsity
+            beta_raw = torch.sigmoid(self.W_beta(x))
+            thresh = self.config.sparse_write_threshold
+            beta = (F.relu(beta_raw - thresh) / (1.0 - thresh + 1e-8)) * torch.exp(self.log_beta_scale)[None, None, :]
+            
+            # Continuous Decay gate alpha: exp(-Delta_t * lambda_h)
+            if self.config.use_variable_delta_t:
+                delta_t = F.softplus(self.W_delta(x)) + 1e-3
+                decay_rate = torch.exp(self.W_lambda)[None, None, :]
+                alpha = torch.exp(-delta_t * decay_rate).clamp(min=1e-4, max=0.9999)
+            else:
+                alpha = torch.sigmoid(self.W_alpha(x)).clamp(min=1e-4, max=0.9999)
             
         S_prev, n_prev = state if state is not None else (None, None)
         
@@ -393,3 +456,23 @@ class TokenizedHGDM(nn.Module):
             next_logits = logits[:, -1, :]
             
         return torch.cat(generated, dim=1)
+
+    def fuse_projections(self):
+        """
+        Fuses all 6 linear projections (W_q, W_k, W_v, W_beta, W_delta/W_alpha, W_out)
+        into a single GEMM projection W_in across all layers.
+        """
+        for layer in self.layers:
+            layer.mixer.fuse_projections()
+        print(f"[Fused] Successfully fused all 6 linear projections into W_in across {len(self.layers)} layers.")
+
+    def to_cuda_graph(self, device: Optional[torch.device] = None):
+        """
+        Wraps this model in a CUDAGraphedHGDM instance, capturing the single-token
+        recurrent generation step into a CUDA Graph for zero-CPU-overhead execution.
+        """
+        if device is None:
+            device = next(self.parameters()).device
+        from tokenized.cuda_graph import CUDAGraphedHGDM
+        return CUDAGraphedHGDM(self, device)
+
