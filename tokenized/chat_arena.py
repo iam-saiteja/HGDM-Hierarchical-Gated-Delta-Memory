@@ -65,6 +65,7 @@ def main():
     parser.add_argument("--tokenizer", type=str, default="gpt2")
     parser.add_argument("--max_new_tokens", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--prompt", type=str, default=None, help="One-shot prompt to evaluate")
     parser.add_argument("--cuda_graph", action="store_true", default=True, help="Accelerate HGDM with CUDA Graphs and fused GEMM")
     parser.add_argument("--no_cuda_graph", dest="cuda_graph", action="store_false", help="Disable CUDA Graphs and use eager PyTorch")
     args = parser.parse_args()
