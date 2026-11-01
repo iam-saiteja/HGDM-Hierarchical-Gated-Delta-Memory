@@ -172,15 +172,15 @@ class CUDAGraphedHGDM:
             if self.static_states[i][1] is not None:
                 self.static_states[i][1].copy_(prime_states[i][1])
                 
-        curr_token = torch.argmax(logits[:, -1:], dim=-1, keepdim=True)
+        curr_token = torch.argmax(logits[:, -1], dim=-1, keepdim=True)
         generated = [prompt_ids, curr_token]
         
         # 3. Fast CUDA Graph replay loop
         for _ in range(max_new_tokens - 1):
             self.static_token.copy_(curr_token)
             self.graph.replay()
-            # Fast greedy argmax directly from static_logits
-            next_token = torch.argmax(self.static_logits[:, -1:], dim=-1)
+            # Fast greedy argmax directly from static_logits: [1, 1, V] -> [1, 1]
+            next_token = torch.argmax(self.static_logits[:, -1], dim=-1, keepdim=True)
             generated.append(next_token)
             curr_token = next_token
             
