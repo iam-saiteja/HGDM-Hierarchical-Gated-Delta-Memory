@@ -213,11 +213,12 @@ class HierarchicalBandMemory(nn.Module):
         
         for k_idx in range(self.K):
             # Readout: out_k = S^{(k)} * q
-            o_k = torch.einsum('bhkd,bhk->bhd', S_bands[:, k_idx], q)
+            s_k = S_bands[:, k_idx].to(dtype=q.dtype)
+            o_k = torch.einsum('bhkd,bhk->bhd', s_k, q)
             
             # Tournament key alignment score: q^T n^{(k)} / (||n^{(k)}|| + 1e-4)
             if self.config.use_epistemic_gate and n_bands is not None:
-                n_curr = n_bands[:, k_idx]
+                n_curr = n_bands[:, k_idx].to(dtype=q.dtype)
                 n_norm = n_curr.norm(dim=-1, keepdim=True).clamp(min=1e-4)
                 n_unit = n_curr / n_norm
                 score_k = torch.sum(q * n_unit, dim=-1) # [B, H]

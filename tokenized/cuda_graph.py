@@ -53,23 +53,25 @@ class CUDAGraphedHGDM:
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
-            for _ in range(5):
+            with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+                for _ in range(5):
+                    logits, next_s = self.model(self.static_token, states=self.static_states)
+                    for i in range(len(self.model.layers)):
+                        self.static_states[i][0].copy_(next_s[i][0])
+                        if self.static_states[i][1] is not None:
+                            self.static_states[i][1].copy_(next_s[i][1])
+                    self.static_logits.copy_(logits)
+        torch.cuda.current_stream().wait_stream(s)
+        
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph, stream=s):
+            with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
                 logits, next_s = self.model(self.static_token, states=self.static_states)
                 for i in range(len(self.model.layers)):
                     self.static_states[i][0].copy_(next_s[i][0])
                     if self.static_states[i][1] is not None:
                         self.static_states[i][1].copy_(next_s[i][1])
                 self.static_logits.copy_(logits)
-        torch.cuda.current_stream().wait_stream(s)
-        
-        self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.graph, stream=s):
-            logits, next_s = self.model(self.static_token, states=self.static_states)
-            for i in range(len(self.model.layers)):
-                self.static_states[i][0].copy_(next_s[i][0])
-                if self.static_states[i][1] is not None:
-                    self.static_states[i][1].copy_(next_s[i][1])
-            self.static_logits.copy_(logits)
             
         print("[CUDA Graph] Graph captured successfully!")
 
