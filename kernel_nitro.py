@@ -1194,3 +1194,139 @@ class FusedVectorScan(torch.autograd.Function):
 
 def fused_vector_scan(alpha, beta, k, initial_n=None, chunk_size=32):
     return FusedVectorScan.apply(alpha, beta, k, initial_n, chunk_size)
+
+
+# ──────────────────────────────────────────────────────────────────
+# FUSED SINGLE-STEP KERNEL (v11 Optimization: Fast Autoregressive Step)
+# ──────────────────────────────────────────────────────────────────
+
+@triton.jit
+def _fused_step_fwd_kernel(
+    Q, K, V, Alpha, Beta, OutGate,
+    S_prev, S_out,
+    N_prev, N_out,
+    Out,
+    USE_EPISTEMIC: tl.constexpr,
+    D_K: tl.constexpr,
+    D_V: tl.constexpr,
+    stride_qb, stride_qh, stride_qd,
+    stride_kb, stride_kh, stride_kd,
+    stride_vb, stride_vh, stride_vd,
+    stride_ab, stride_ah,
+    stride_bb, stride_bh,
+    stride_gb, stride_gh, stride_gd,
+    stride_sb, stride_sh, stride_sk, stride_sv,
+    stride_sob, stride_soh, stride_sok, stride_sov,
+    stride_nb, stride_nh, stride_nk,
+    stride_nob, stride_noh, stride_nok,
+    stride_ob, stride_oh, stride_od,
+):
+    batch_idx = tl.program_id(0)
+    head_idx  = tl.program_id(1)
+
+    offs_k = tl.arange(0, D_K)
+    offs_v = tl.arange(0, D_V)
+
+    # Base pointers
+    q_ptr = Q + batch_idx * stride_qb + head_idx * stride_qh + offs_k * stride_qd
+    k_ptr = K + batch_idx * stride_kb + head_idx * stride_kh + offs_k * stride_kd
+    v_ptr = V + batch_idx * stride_vb + head_idx * stride_vh + offs_v * stride_vd
+    a_ptr = Alpha + batch_idx * stride_ab + head_idx * stride_ah
+    b_ptr = Beta  + batch_idx * stride_bb + head_idx * stride_bh
+    g_ptr = OutGate + batch_idx * stride_gb + head_idx * stride_gh + offs_v * stride_gd
+
+    s_ptr = S_prev + batch_idx * stride_sb + head_idx * stride_sh + offs_k[:, None] * stride_sk + offs_v[None, :] * stride_sv
+    s_out_ptr = S_out + batch_idx * stride_sob + head_idx * stride_soh + offs_k[:, None] * stride_sok + offs_v[None, :] * stride_sov
+
+    o_ptr = Out + batch_idx * stride_ob + head_idx * stride_oh + offs_v * stride_od
+
+    # Load vectors & scalars
+    alpha = tl.load(a_ptr).to(tl.float32)
+    beta  = tl.load(b_ptr).to(tl.float32)
+    q     = tl.load(q_ptr).to(tl.float32)
+    k     = tl.load(k_ptr).to(tl.float32)
+    v     = tl.load(v_ptr).to(tl.float32)
+    gate  = tl.load(g_ptr).to(tl.float32)
+
+    # Load S_prev [D_K, D_V]
+    S = tl.load(s_ptr).to(tl.float32)
+
+    # 1. State update: S_new = alpha * S + beta * (k * v)
+    delta = k[:, None] * v[None, :]
+    S_new = alpha * S + beta * delta
+    tl.store(s_out_ptr, S_new)
+
+    # 2. Query readout: out_v = sum_k (S_new[k, v] * q[k])
+    out_v = tl.sum(S_new * q[:, None], axis=0)
+
+    # 3. Epistemic Normalization
+    if USE_EPISTEMIC:
+        n_ptr = N_prev + batch_idx * stride_nb + head_idx * stride_nh + offs_k * stride_nk
+        n_out_ptr = N_out + batch_idx * stride_nob + head_idx * stride_noh + offs_k * stride_nok
+        
+        n_prev = tl.load(n_ptr).to(tl.float32)
+        n_new = alpha * n_prev + beta * k
+        tl.store(n_out_ptr, n_new)
+
+        n_abs = tl.abs(n_new)
+        n_inf = tl.max(n_abs, axis=0)
+        denom = tl.maximum(n_inf, 1.0)
+
+        n_sq = n_new * n_new
+        norm_n = tl.sqrt(tl.sum(n_sq, axis=0) + 1e-8)
+        conf = 2.0 * tl.sigmoid(2.0 * norm_n) - 1.0
+
+        out_v = (out_v / denom) * conf
+
+    out_final = out_v * gate
+    tl.store(o_ptr, out_final)
+
+
+def fused_nitro_step(q, k, v, alpha, beta, out_gate, S_prev, n_prev=None):
+    """
+    Fused Triton single-step execution for autoregressive token generation (T=1).
+    Inputs:
+      q, k: [B, H, dk]
+      v, out_gate: [B, H, dv]
+      alpha, beta: [B, H]
+      S_prev: [B, H, dk, dv]
+      n_prev: [B, H, dk] (optional)
+    Returns:
+      out: [B, H, dv], S_out: [B, H, dk, dv], n_out: [B, H, dk] or None
+    """
+    B, H, dk = q.shape
+    dv = v.shape[-1]
+    
+    out = torch.empty((B, H, dv), device=q.device, dtype=q.dtype)
+    S_out = torch.empty_like(S_prev)
+    use_epistemic = n_prev is not None
+    if use_epistemic:
+        n_out = torch.empty_like(n_prev)
+        np_tensor = n_prev
+    else:
+        n_out = torch.empty(0, device=q.device, dtype=q.dtype)
+        np_tensor = torch.empty(0, device=q.device, dtype=q.dtype)
+
+    grid = (B, H)
+    _fused_step_fwd_kernel[grid](
+        q, k, v, alpha, beta, out_gate,
+        S_prev, S_out,
+        np_tensor, n_out,
+        out,
+        USE_EPISTEMIC=use_epistemic,
+        D_K=dk, D_V=dv,
+        stride_qb=q.stride(0), stride_qh=q.stride(1), stride_qd=q.stride(2),
+        stride_kb=k.stride(0), stride_kh=k.stride(1), stride_kd=k.stride(2),
+        stride_vb=v.stride(0), stride_vh=v.stride(1), stride_vd=v.stride(2),
+        stride_ab=alpha.stride(0), stride_ah=alpha.stride(1),
+        stride_bb=beta.stride(0), stride_bh=beta.stride(1),
+        stride_gb=out_gate.stride(0), stride_gh=out_gate.stride(1), stride_gd=out_gate.stride(2),
+        stride_sb=S_prev.stride(0), stride_sh=S_prev.stride(1), stride_sk=S_prev.stride(2), stride_sv=S_prev.stride(3),
+        stride_sob=S_out.stride(0), stride_soh=S_out.stride(1), stride_sok=S_out.stride(2), stride_sov=S_out.stride(3),
+        stride_nb=np_tensor.stride(0) if use_epistemic else 0, stride_nh=np_tensor.stride(1) if use_epistemic else 0, stride_nk=np_tensor.stride(2) if use_epistemic else 0,
+        stride_nob=n_out.stride(0) if use_epistemic else 0, stride_noh=n_out.stride(1) if use_epistemic else 0, stride_nok=n_out.stride(2) if use_epistemic else 0,
+        stride_ob=out.stride(0), stride_oh=out.stride(1), stride_od=out.stride(2),
+        num_warps=2,
+    )
+    return out, S_out, (n_out if use_epistemic else None)
+

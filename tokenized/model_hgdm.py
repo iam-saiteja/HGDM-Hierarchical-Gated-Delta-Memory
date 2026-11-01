@@ -7,10 +7,11 @@ from tokenized.config import TokenizedConfig
 
 # Attempt to import custom Triton scan kernel if available
 try:
-    from kernel_nitro import fused_nitro_scan, fused_nitro_scan_with_n
+    from kernel_nitro import fused_nitro_scan, fused_nitro_scan_with_n, fused_nitro_step
 except (ImportError, Exception):
     fused_nitro_scan = None
     fused_nitro_scan_with_n = None
+    fused_nitro_step = None
 
 
 class RMSNorm(nn.Module):
@@ -225,8 +226,24 @@ class TokenizedMHGD(nn.Module):
 
             out = (out * out_gate).reshape(B, T, -1)
             return self.W_o(out), (S_final, n_last)
+
+        # Fast Fused Triton Single-Step Kernel (T=1 Autoregressive Generation)
+        elif T == 1 and x.is_cuda and fused_nitro_step is not None:
+            S = S_prev if S_prev is not None else torch.zeros(
+                B, self.H, self.d_k, self.d_v, device=x.device, dtype=x.dtype
+            )
+            n = n_prev if (self.config.use_epistemic_gate and n_prev is not None) else (
+                torch.zeros(B, self.H, self.d_k, device=x.device, dtype=x.dtype) if self.config.use_epistemic_gate else None
+            )
+            out_step, S, n = fused_nitro_step(
+                q[:, 0].contiguous(), k[:, 0].contiguous(), v[:, 0].contiguous(),
+                alpha[:, 0].contiguous(), beta[:, 0].contiguous(), out_gate[:, 0].contiguous(),
+                S.contiguous(), n.contiguous() if n is not None else None
+            )
+            out = out_step.unsqueeze(1).reshape(B, 1, -1)
+            return self.W_o(out), (S, n)
             
-        # Step-by-Step Recurrent Mode (O(1) Memory Autoregressive Generation)
+        # Step-by-Step Recurrent Mode (O(1) Memory Autoregressive Generation Fallback)
         else:
             S = S_prev if S_prev is not None else torch.zeros(
                 B, self.H, self.d_k, self.d_v, device=x.device, dtype=x.dtype
