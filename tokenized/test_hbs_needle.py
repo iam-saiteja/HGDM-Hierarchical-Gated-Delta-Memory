@@ -134,14 +134,14 @@ def run_needle_stress_test(device: torch.device):
             
             o_b0 = torch.einsum('bhkd,bhk->bhd', s_hbs[0][:, 0], q_query)
             o_clean_b0 = torch.einsum('bhkd,bhk->bhd', s_hbs_0[0][:, 0], q_clean)
-            cossim_b0 = F.cosine_similarity(o_b0, F.normalize(o_clean_b0, p=2, dim=-1), dim=-1).item()
+            cossim_b0 = F.cosine_similarity(o_b0, F.normalize(o_clean_b0, p=2, dim=-1), dim=-1).mean().item()
             
             o_b2 = torch.einsum('bhkd,bhk->bhd', s_hbs[0][:, 2], q_query)
             o_clean_b2 = torch.einsum('bhkd,bhk->bhd', s_hbs_0[0][:, 2], q_clean)
-            cossim_b2 = F.cosine_similarity(o_b2, F.normalize(o_clean_b2, p=2, dim=-1), dim=-1).item()
+            cossim_b2 = F.cosine_similarity(o_b2, F.normalize(o_clean_b2, p=2, dim=-1), dim=-1).mean().item()
             
             o_b3 = torch.einsum('bhkd,bhk->bhd', s_hbs[0][:, 3], q_query)
-            cossim_b3 = F.cosine_similarity(o_b3, target_b3_norm, dim=-1).item()
+            cossim_b3 = F.cosine_similarity(o_b3, target_b3_norm, dim=-1).mean().item()
             
         print(f"{N:15d} | {max(0.0, cossim_flat):15.4f} | {max(0.0, cossim_b0):15.4f} | {max(0.0, cossim_b2):17.4f} | {max(0.0, cossim_b3):23.4f}")
         
