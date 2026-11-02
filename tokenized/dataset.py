@@ -130,3 +130,130 @@ def create_dataloader(
         max_tokens=max_tokens,
     )
     return DataLoader(dataset, batch_size=batch_size)
+
+
+class StatefulStreamDataset:
+    """
+    Maintains B parallel token streams for stateful recurrent training (TBPTT).
+    Each stream advances continuously through documents.
+    Returns:
+      input_ids: [B, seq_len]
+      labels: [B, seq_len]
+      reset_mask: [B] (True if this chunk is the start of a new document, requiring state zeroing)
+    """
+    def __init__(
+        self,
+        dataset_name: str = "HuggingFaceTB/smoltalk",
+        split: str = "train",
+        subset: Optional[str] = None,
+        tokenizer_name: str = "gpt2",
+        batch_size: int = 4,
+        seq_len: int = 1024,
+        max_tokens: Optional[int] = None,
+    ):
+        self.dataset_name = dataset_name
+        self.split = split
+        if subset is None and "smoltalk" in dataset_name.lower():
+            subset = "all"
+        self.subset = subset
+        self.batch_size = batch_size
+        self.seq_len = seq_len
+        self.max_tokens = max_tokens
+        
+        if AutoTokenizer is None:
+            raise ImportError("Please install transformers via `uv pip install transformers`")
+            
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.eos_id = self.tokenizer.eos_token_id or 0
+        
+        # Instantiate B independent document iterators
+        self.streams = [
+            self._create_document_stream(self.dataset_name, self.split, self.subset, stream_idx=i)
+            for i in range(batch_size)
+        ]
+        self.buffers = [[] for _ in range(batch_size)]
+        self.is_new_doc = [True for _ in range(batch_size)]
+        self.tokens_yielded = 0
+
+    def _create_document_stream(self, dataset_name, split, subset, stream_idx=0):
+        if load_dataset is None:
+            sample_dialogues = [
+                "User: What is artificial intelligence?\nAssistant: Artificial intelligence refers to systems designed to perform cognitive tasks.",
+                "User: Explain continuous recurrent memory.\nAssistant: HGDM maintains a persistent state matrix across tokens.",
+                "User: Tell me a story about exploration.\nAssistant: The rover rolled across the red dust of the crater, searching for ancient water.",
+            ]
+            while True:
+                for s in sample_dialogues:
+                    yield s
+        else:
+            try:
+                if subset:
+                    ds = load_dataset(dataset_name, subset, split=split, streaming=True)
+                else:
+                    ds = load_dataset(dataset_name, split=split, streaming=True)
+                for i, row in enumerate(ds):
+                    if i < stream_idx:
+                        continue
+                    if "messages" in row:
+                        formatted = []
+                        for msg in row["messages"]:
+                            role = msg.get("role", "User").capitalize()
+                            content = msg.get("content", "")
+                            formatted.append(f"{role}: {content}")
+                        yield "\n\n".join(formatted)
+                    elif "text" in row:
+                        yield row["text"]
+                    elif "content" in row:
+                        yield row["content"]
+            except Exception as e:
+                while True:
+                    yield "User: What is HGDM?\nAssistant: HGDM provides O(1) stateful recurrence with hierarchical temporal bands."
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> Dict[str, torch.Tensor]:
+        if self.max_tokens is not None and self.tokens_yielded >= self.max_tokens:
+            raise StopIteration
+            
+        batch_inputs = []
+        batch_labels = []
+        reset_mask = []
+        
+        for b in range(self.batch_size):
+            resets_this_slot = False
+            while len(self.buffers[b]) < self.seq_len + 1:
+                try:
+                    doc = next(self.streams[b])
+                except StopIteration:
+                    self.streams[b] = self._create_document_stream(
+                        self.dataset_name, self.split, self.subset, stream_idx=b
+                    )
+                    doc = next(self.streams[b])
+                    
+                tokens = self.tokenizer.encode(doc)
+                tokens.append(self.eos_id)
+                
+                if len(self.buffers[b]) == 0:
+                    resets_this_slot = True
+                self.buffers[b].extend(tokens)
+                
+            chunk = self.buffers[b][:self.seq_len + 1]
+            self.buffers[b] = self.buffers[b][self.seq_len:]
+            
+            x = chunk[:-1]
+            y = chunk[1:]
+            
+            batch_inputs.append(x)
+            batch_labels.append(y)
+            reset_mask.append(resets_this_slot)
+            
+        self.tokens_yielded += self.batch_size * self.seq_len
+        
+        return {
+            "input_ids": torch.tensor(batch_inputs, dtype=torch.long),
+            "labels": torch.tensor(batch_labels, dtype=torch.long),
+            "reset_mask": torch.tensor(reset_mask, dtype=torch.bool),
+        }

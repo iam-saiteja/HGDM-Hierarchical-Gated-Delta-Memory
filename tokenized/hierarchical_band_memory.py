@@ -19,11 +19,12 @@ class HBSConfig:
     n_heads: int = 6
     d_k: int = 64
     d_v: int = 64
-    n_bands: int = 4                           # Dyadic bands: 2^0, 2^1, 2^2, 2^3
-    base_taus: Tuple[float, ...] = (8.0, 32.0, 128.0, 10000.0) # Multi-timescale priors
-    band_thresholds: Tuple[float, ...] = (0.05, 0.10, 0.15, 0.20) # Hierarchical write thresholds
+    n_bands: int = 8                           # Dyadic bands: 2^0 to 2^7 (strides 1 to 128)
+    base_taus: Tuple[float, ...] = (4.0, 16.0, 64.0, 256.0, 1024.0, 4096.0, 16384.0, 500000.0) # Multi-timescale priors
+    band_thresholds: Tuple[float, ...] = (0.05, 0.08, 0.10, 0.12, 0.15, 0.20, 0.25, 0.30) # Hierarchical write thresholds
     use_epistemic_gate: bool = True
     tournament_scale: float = 5.0
+    lateral_inhibition_gamma: float = 0.35     # GABAergic lateral self-inhibition
 
 
 class HierarchicalBandMemory(nn.Module):
@@ -51,12 +52,23 @@ class HierarchicalBandMemory(nn.Module):
         self.W_out  = nn.Linear(config.d_model, self.H * self.d_v, bias=True)
         self.W_router = nn.Linear(config.d_model, self.H * self.K, bias=True)
         
-        # Continuous multi-timescale decay priors:
-        # Band 0: fast local syntax (tau ~ 8 tokens)
-        # Band 1: clause / phrases (tau ~ 32 tokens)
-        # Band 2: sentence discourse (tau ~ 128 tokens)
-        # Band 3: permanent episodic anchor (tau ~ 10,000 tokens, alpha ~ 0.9999)
-        lambdas = [1.0 / max(1.0, tau) for tau in config.base_taus]
+        # Continuous multi-timescale decay priors calibrated for K bands:
+        # Resolve taus matching self.K
+        if len(config.base_taus) == self.K:
+            taus = config.base_taus
+        elif len(config.base_taus) > self.K:
+            taus = config.base_taus[:self.K]
+        else:
+            taus = tuple(4.0 * (4.0 ** i) for i in range(self.K))
+
+        if len(config.band_thresholds) == self.K:
+            thresholds = config.band_thresholds
+        elif len(config.band_thresholds) > self.K:
+            thresholds = config.band_thresholds[:self.K]
+        else:
+            thresholds = tuple(0.05 + 0.035 * i for i in range(self.K))
+
+        lambdas = [1.0 / max(1.0, tau) for tau in taus]
         log_lambdas = [math.log(l) for l in lambdas]
         self.band_lambdas = nn.Parameter(
             torch.tensor(log_lambdas, dtype=torch.float32).view(1, 1, self.K, 1) # [1, 1, K, 1]
@@ -69,7 +81,7 @@ class HierarchicalBandMemory(nn.Module):
         # Register hierarchical write thresholds
         self.register_buffer(
             "thresholds",
-            torch.tensor(config.band_thresholds, dtype=torch.float32).view(1, 1, self.K)
+            torch.tensor(thresholds, dtype=torch.float32).view(1, 1, self.K)
         )
         
         self._init_weights()
@@ -138,10 +150,12 @@ class HierarchicalBandMemory(nn.Module):
         Allocates the O(1) multi-scale state hierarchy:
         - S_bands: [B, K, H, d_k, d_v]
         - n_bands: [B, K, H, d_k]
+        - last_k:  [B, H, d_k] (GABAergic lateral self-inhibition)
         """
         S = torch.zeros(batch_size, self.K, self.H, self.d_k, self.d_v, device=device, dtype=dtype)
         n = torch.zeros(batch_size, self.K, self.H, self.d_k, device=device, dtype=dtype) if self.config.use_epistemic_gate else None
-        return (S, n)
+        last_k = torch.zeros(batch_size, self.H, self.d_k, device=device, dtype=dtype)
+        return (S, n, last_k)
 
     def forward_step(
         self,
@@ -162,7 +176,11 @@ class HierarchicalBandMemory(nn.Module):
         if state is None:
             state = self.init_state(B, device, dtype)
             
-        S_bands, n_bands = state
+        if len(state) == 3:
+            S_bands, n_bands, last_k = state
+        else:
+            S_bands, n_bands = state
+            last_k = None
         
         # 1. Projections
         if getattr(self, "is_fused", False):
@@ -190,6 +208,14 @@ class HierarchicalBandMemory(nn.Module):
             router_logits = self.W_router(x).view(B, self.H, self.K)
             beta_raw = torch.sigmoid(self.W_beta(x)).view(B, self.H, self.K)
             delta_raw = self.W_delta(x).view(B, self.H, self.K)
+
+        # GABAergic Lateral Self-Inhibition:
+        # If current query overlaps with immediate predecessor key, suppress echo loops
+        inh_gamma = getattr(self.config, "lateral_inhibition_gamma", 0.0)
+        if last_k is not None and inh_gamma > 0:
+            overlap = torch.sum(q * last_k, dim=-1, keepdim=True) # [B, H, 1]
+            router_logits = router_logits - inh_gamma * overlap
+
         thresh = self.thresholds # [1, 1, K]
         beta = (F.relu(beta_raw - thresh) / (1.0 - thresh + 1e-8)) * torch.exp(self.log_beta_scale)[None, :, :]
         
@@ -197,7 +223,6 @@ class HierarchicalBandMemory(nn.Module):
             beta = torch.zeros_like(beta)
             
         # Multi-band alpha decay gates: [B, H, K]
-        delta_raw = self.W_delta(x).view(B, self.H, self.K)
         delta_t = F.softplus(delta_raw) + 1e-3
         decay_rates = torch.exp(self.band_lambdas).squeeze(-1) # [1, 1, K]
         alpha = torch.exp(-delta_t * decay_rates).clamp(min=1e-4, max=0.9999) # [B, H, K]
@@ -256,7 +281,7 @@ class HierarchicalBandMemory(nn.Module):
         out_fused = out_fused * out_gate
         
         out = self.W_o(out_fused.reshape(B, -1)).unsqueeze(1)
-        next_state = (S_new, n_new)
+        next_state = (S_new, n_new, k.detach())
         return out, next_state
 
     def forward(
@@ -268,6 +293,7 @@ class HierarchicalBandMemory(nn.Module):
         Processes sequence x: [B, T, d_model].
         Uses fast parallel vectorized scan when T > 1 (training),
         and fast O(1) step recurrence when T == 1 (inference).
+        Supports TBPTT state carryover when `state` is passed.
         """
         B, T, _ = x.shape
         if T == 1:
@@ -275,6 +301,14 @@ class HierarchicalBandMemory(nn.Module):
             
         device = x.device
         dtype = x.dtype
+        
+        # Parse initial state if provided (stateful document streaming)
+        S_init, n_init, last_k = None, None, None
+        if state is not None:
+            if len(state) == 3:
+                S_init, n_init, last_k = state
+            elif len(state) == 2:
+                S_init, n_init = state
         
         # 1. Projections across full sequence
         q = self.W_q(x).view(B, T, self.H, self.d_k)
@@ -286,6 +320,16 @@ class HierarchicalBandMemory(nn.Module):
         
         out_gate = torch.sigmoid(self.W_out(x)).view(B, T, self.H, self.d_v)
         router_logits = self.W_router(x).view(B, T, self.H, self.K)
+        
+        # GABAergic Lateral Self-Inhibition along sequence
+        inh_gamma = getattr(self.config, "lateral_inhibition_gamma", 0.0)
+        if inh_gamma > 0:
+            if last_k is not None:
+                k_prev = torch.cat([last_k.unsqueeze(1), k[:, :-1]], dim=1) # [B, T, H, d_k]
+            else:
+                k_prev = torch.cat([torch.zeros_like(k[:, :1]), k[:, :-1]], dim=1)
+            overlap = torch.sum(q * k_prev, dim=-1, keepdim=True) # [B, T, H, 1]
+            router_logits = router_logits - inh_gamma * overlap
         
         # Gates [B, T, H, K]
         beta_raw = torch.sigmoid(self.W_beta(x)).view(B, T, self.H, self.K)
@@ -324,8 +368,21 @@ class HierarchicalBandMemory(nn.Module):
             attn = qk * decay_matrix
             out_k = torch.matmul(attn, v_p).permute(0, 2, 1, 3) # [B, T, H, d_v]
             
+            # Incorporate carried-over state S_init[:, k_idx] if present
+            decay_from_start = torch.exp(cumsum_log) # [B, H, T]
+            if S_init is not None:
+                S_0 = S_init[:, k_idx].to(dtype=q.dtype) # [B, H, d_k, d_v]
+                s0_q = torch.einsum('bhkd,bhtk->bhtd', S_0, q_p)
+                out_k_carry = (decay_from_start.unsqueeze(-1) * s0_q).permute(0, 2, 1, 3)
+                out_k = out_k + out_k_carry
+            
             if self.config.use_epistemic_gate:
                 n_vec = torch.matmul(decay_matrix, k_p).permute(0, 2, 1, 3) # [B, T, H, d_k]
+                if n_init is not None and n_init[:, k_idx] is not None:
+                    n_0 = n_init[:, k_idx].to(dtype=q.dtype) # [B, H, d_k]
+                    n_carry = (decay_from_start.unsqueeze(-1) * n_0.unsqueeze(2)).permute(0, 2, 1, 3)
+                    n_vec = n_vec + n_carry
+
                 n_norm = n_vec.norm(dim=-1, keepdim=True).clamp(min=1e-4)
                 denom = torch.clamp(n_vec.abs().max(dim=-1, keepdim=True)[0], min=1.0)
                 conf = torch.tanh(n_norm)
@@ -342,6 +399,9 @@ class HierarchicalBandMemory(nn.Module):
             # Final state for recurrent continuation
             decay_to_end = torch.exp(cumsum_log[:, :, -1:] - cumsum_log) * beta_k.permute(0, 2, 1)
             S_k_final = torch.einsum('bht,bhtk,bhtd->bhkd', decay_to_end, k_p, v_p)
+            if S_init is not None:
+                decay_total = torch.exp(cumsum_log[:, :, -1:, None]) # [B, H, 1, 1]
+                S_k_final = S_k_final + decay_total * S_init[:, k_idx].to(dtype=q.dtype)
             final_S_list.append(S_k_final)
             
         # 3. Stack and Tournament Convex Combination
@@ -356,5 +416,6 @@ class HierarchicalBandMemory(nn.Module):
         
         S_final_stack = torch.stack(final_S_list, dim=1) # [B, K, H, d_k, d_v]
         n_final_stack = torch.stack(final_n_list, dim=1) if final_n_list else None
+        last_k_step = k[:, -1].detach() # [B, H, d_k]
         
-        return out, (S_final_stack, n_final_stack)
+        return out, (S_final_stack, n_final_stack, last_k_step)

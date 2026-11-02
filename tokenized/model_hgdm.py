@@ -353,7 +353,8 @@ class TokenizedHGDMLayer(nn.Module):
                 n_heads=config.n_heads,
                 d_k=config.d_k,
                 d_v=config.d_v,
-                n_bands=getattr(config, "hbs_n_bands", 4),
+                n_bands=getattr(config, "hbs_n_bands", 8),
+                lateral_inhibition_gamma=getattr(config, "lateral_inhibition_gamma", 0.35),
             )
             self.mixer = HierarchicalBandMemory(hbs_cfg)
         else:
@@ -364,8 +365,8 @@ class TokenizedHGDMLayer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        state: Optional[Tuple[torch.Tensor, Optional[torch.Tensor]]] = None,
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
+        state: Optional[Tuple] = None,
+    ) -> Tuple[torch.Tensor, Tuple]:
         mixer_out, next_state = self.mixer(self.norm1(x), state=state)
         x = x + mixer_out
         x = x + self.mlp(self.norm2(x))
@@ -378,6 +379,7 @@ class TokenizedHGDM(nn.Module):
     - Zero Attention / Zero KV Cache.
     - Constant O(1) Memory during generation.
     - Tied input embedding and output projection.
+    - Optional Multi-Token Prediction (MTP) for trajectory lookahead.
     """
     def __init__(self, config: TokenizedConfig):
         super().__init__()
@@ -394,6 +396,14 @@ class TokenizedHGDM(nn.Module):
         self.norm_f = RMSNorm(config.d_model)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         self.lm_head.weight = self.embedding.weight  # Weight tying
+
+        # Multi-Token Prediction (MTP) auxiliary prediction heads
+        self.use_mtp = getattr(config, "use_mtp", False)
+        if self.use_mtp:
+            self.mtp_norm_2 = RMSNorm(config.d_model)
+            self.mtp_proj_2 = nn.Linear(config.d_model, config.d_model, bias=False)
+            self.mtp_norm_4 = RMSNorm(config.d_model)
+            self.mtp_proj_4 = nn.Linear(config.d_model, config.d_model, bias=False)
         
         # Initialize
         self.apply(self._init_weights)
@@ -409,12 +419,14 @@ class TokenizedHGDM(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        states: Optional[List[Tuple[torch.Tensor, Optional[torch.Tensor]]]] = None,
-    ) -> Tuple[torch.Tensor, List[Tuple[torch.Tensor, Optional[torch.Tensor]]]]:
+        states: Optional[List[Tuple]] = None,
+        return_mtp: bool = False,
+    ) -> Tuple:
         """
         Forward pass.
         input_ids: [B, T]
         states: Optional list of states per layer
+        return_mtp: If True, also computes logits for t+2 and t+4
         """
         x = self.embedding(input_ids)
         
@@ -424,8 +436,16 @@ class TokenizedHGDM(nn.Module):
             x, next_state = layer(x, state=layer_state)
             next_states.append(next_state)
             
-        x = self.norm_f(x)
-        logits = self.lm_head(x)
+        h_final = x
+        logits = self.lm_head(self.norm_f(h_final))
+
+        if return_mtp and self.use_mtp:
+            h2 = h_final + self.mtp_proj_2(self.mtp_norm_2(h_final))
+            logits_2 = self.lm_head(self.norm_f(h2))
+            h4 = h_final + self.mtp_proj_4(self.mtp_norm_4(h_final))
+            logits_4 = self.lm_head(self.norm_f(h4))
+            return (logits, logits_2, logits_4), next_states
+
         return logits, next_states
 
     @torch.no_grad()
@@ -435,11 +455,13 @@ class TokenizedHGDM(nn.Module):
         max_new_tokens: int = 128,
         temperature: float = 0.7,
         top_k: int = 50,
+        repetition_penalty: float = 1.15,
     ) -> torch.Tensor:
         """
         Pure O(1) Memory Autoregressive Generation.
         Processes prompt once to prime state, then emits token-by-token
         using only the persistent recurrent state matrix (zero KV cache).
+        Applies repetition penalty to prevent repetitive loops.
         """
         self.eval()
         B, T_prompt = prompt_ids.shape
@@ -447,12 +469,22 @@ class TokenizedHGDM(nn.Module):
         
         # 1. Prime recurrent states over prompt and obtain first token prediction
         logits, states = self(prompt_ids)
-        next_logits = logits[:, -1, :]
+        next_logits = logits[:, -1, :].clone()
         
         generated = [prompt_ids]
+        generated_tokens_set = [set(prompt_ids[b].tolist()) for b in range(B)]
         
         for _ in range(max_new_tokens):
             logits_step = next_logits / max(1e-5, temperature)
+            
+            # Apply repetition penalty to previously seen tokens
+            if repetition_penalty != 1.0:
+                for b in range(B):
+                    for tok_id in generated_tokens_set[b]:
+                        if logits_step[b, tok_id] > 0:
+                            logits_step[b, tok_id] /= repetition_penalty
+                        else:
+                            logits_step[b, tok_id] *= repetition_penalty
             
             if top_k > 0:
                 v, _ = torch.topk(logits_step, min(top_k, logits_step.size(-1)))
@@ -461,10 +493,12 @@ class TokenizedHGDM(nn.Module):
             probs = F.softmax(logits_step, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
             generated.append(next_token)
+            for b in range(B):
+                generated_tokens_set[b].add(next_token[b, 0].item())
             
             # 2. Autoregressive step: forward newly generated token to advance state
             logits, states = self(next_token, states=states)
-            next_logits = logits[:, -1, :]
+            next_logits = logits[:, -1, :].clone()
             
         return torch.cat(generated, dim=1)
 

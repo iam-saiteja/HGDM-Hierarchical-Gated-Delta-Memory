@@ -20,11 +20,13 @@ class TokenizedConfig:
     use_epistemic_gate: bool = True     # State confidence gating via tanh(||n||)
     sparse_write_threshold: float = 0.1 # Sparsity threshold for ReLU beta gate
     chunk_size: int = 32                # Nitro parallel scan tile size (GPU SRAM)
-    use_hbs: bool = False               # Enable Hierarchical Band Search (dyadic powers of two)
-    hbs_n_bands: int = 4                # Number of dyadic bands (strides 2^0, 2^1, 2^2, 2^3)
+    use_hbs: bool = True                # Enable Hierarchical Band Search (dyadic powers of two)
+    hbs_n_bands: int = 8                # Number of dyadic bands (strides 2^0 to 2^7 for 120k context)
+    lateral_inhibition_gamma: float = 0.35 # GABAergic lateral self-inhibition
+    use_mtp: bool = True                # Multi-Token Prediction (K=2, 4)
+    stateful_carryover: bool = True     # Stateful document streaming (TBPTT)
     
-    # Chinchilla scaling configuration
-    # Optimal tokens ~= 20 * parameters
+    # Recurrent training configuration
     chinchilla_ratio: float = 20.0
     
     def count_parameters(self) -> int:
