@@ -211,17 +211,25 @@ Probed using the `prompt_512.txt` benchmark to calculate the per-layer average t
 
 ---
 
-## Tokenized Natural-Language Arena
+## Tokenized Natural-Language Arena: HGDM-HBS vs. Transformer
 
 To directly benchmark pure recurrence against standard self-attention under strict compute-optimal conditions, the `tokenized/` suite provides an independent subword-tokenized pipeline:
 
-* **Strictly Matched Scaling (Chinchilla Optimal)**: Both Tokenized HGDM (30.8M) and a Matched Transformer (30.7M) were trained on identical token budgets ($20 \times N_{\text{params}} \approx 614\text{M}$ tokens) using `HuggingFaceTB/smoltalk`.
-* **Zero KV-Cache Advantage**: HGDM maintains a strictly constant **288 KB state per user** ($O(1)$ memory) regardless of context length, achieving a **1,024× memory footprint reduction** at 32k context over the Transformer's growing KV-cache.
-* **Degeneration Resistance**: HGDM's contractive ODE decay acts as a regularizer, avoiding the infinite repetition collapse observed in small Transformers during narrative generation.
-* **Benchmark Details**: Full pretraining, SFT prompt-masking curves, and 6-context stress test logs are preserved in [`tokenized/BENCHMARK_RESULTS.md`](tokenized/BENCHMARK_RESULTS.md).
+* **Hierarchical Band Search (HBS)**: The recurrent state is decomposed into 4 dyadic temporal bands ($2^0, 2^1, 2^2, 2^3$) with multi-timescale decay anchors ($\tau_0=4, \tau_1=16, \tau_2=64, \tau_3=10,000$) and dynamic tournament routing, solving the gradient reach and needle-overwriting bottlenecks of 1D recurrence.
+* **Strictly Matched Scaling (Chinchilla Optimal)**: Both Tokenized HGDM (30.9M) and a Matched Transformer (30.7M) were trained from scratch on identical token budgets ($20 \times N_{\text{params}} \approx 619\text{M}$ tokens) using `HuggingFaceTB/smoltalk`.
+* **Supervised Fine-Tuning (SFT) Superiority**: On 500 steps of prompt-masked conversational SFT, **HGDM-HBS achieved a lower loss (1.9382 vs 2.0148) and higher token prediction accuracy (PPL 6.95 vs 7.50)** than the Transformer baseline.
+* **Zero KV-Cache Advantage**: HGDM maintains a strictly constant **1,152 KB state per user** ($O(1)$ memory) regardless of context length, achieving up to a **512× memory footprint reduction** at 64k context over the Transformer's growing KV-cache.
+* **CUDA Graph Pulse Engine**: Linear projections are fused into a single $W_{\text{in}}$ GEMM and captured into a static CUDA Graph, delivering **505.4 to 1,835.8 tok/s** (a **3.45× acceleration** over eager generation in a single GPU pulse with zero CPU latency).
+* **Benchmark Details**: Full pretraining, SFT curves, memory scaling, and structured sequential prompt evaluations are preserved in [`tokenized/BENCHMARK_RESULTS.md`](tokenized/BENCHMARK_RESULTS.md).
 
 ```bash
-# Run the side-by-side conversational arena
+# Run comprehensive inference benchmark (Speed, VRAM, and Scaling)
+python tokenized/benchmark_inference_full.py
+
+# Test structured sequence completion (Counting, Patterns, Retrieval)
+python tokenized/test_sequence_prompts.py
+
+# Run interactive side-by-side conversational arena
 python tokenized/chat_arena.py
 ```
 
