@@ -194,7 +194,7 @@ class StatefulStreamDataset:
                 else:
                     ds = load_dataset(dataset_name, split=split, streaming=True)
                 for i, row in enumerate(ds):
-                    if i < stream_idx:
+                    if (i % self.batch_size) != stream_idx:
                         continue
                     if "messages" in row:
                         formatted = []

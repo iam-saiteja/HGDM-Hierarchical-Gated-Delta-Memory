@@ -213,23 +213,23 @@ Probed using the `prompt_512.txt` benchmark to calculate the per-layer average t
 
 ## Tokenized Natural-Language Arena: HGDM-HBS vs. Transformer
 
-To directly benchmark pure recurrence against standard self-attention under strict compute-optimal conditions, the `tokenized/` suite provides an independent subword-tokenized pipeline:
+To directly benchmark pure recurrence against standard self-attention under strict compute-optimal conditions and long-context horizons (up to 120,000 tokens), the `tokenized/` suite provides an independent subword-tokenized pipeline:
 
-* **Hierarchical Band Search (HBS)**: The recurrent state is decomposed into 4 dyadic temporal bands ($2^0, 2^1, 2^2, 2^3$) with multi-timescale decay anchors ($\tau_0=4, \tau_1=16, \tau_2=64, \tau_3=10,000$) and dynamic tournament routing, solving the gradient reach and needle-overwriting bottlenecks of 1D recurrence.
-* **Strictly Matched Scaling (Chinchilla Optimal)**: Both Tokenized HGDM (30.9M) and a Matched Transformer (30.7M) were trained from scratch on identical token budgets ($20 \times N_{\text{params}} \approx 619\text{M}$ tokens) using `HuggingFaceTB/smoltalk`.
-* **Supervised Fine-Tuning (SFT) Superiority**: On 500 steps of prompt-masked conversational SFT, **HGDM-HBS achieved a lower loss (1.9382 vs 2.0148) and higher token prediction accuracy (PPL 6.95 vs 7.50)** than the Transformer baseline.
-* **Zero KV-Cache Advantage**: HGDM maintains a strictly constant **1,152 KB state per user** ($O(1)$ memory) regardless of context length, achieving up to a **512× memory footprint reduction** at 64k context over the Transformer's growing KV-cache.
-* **CUDA Graph Pulse Engine**: Linear projections are fused into a single $W_{\text{in}}$ GEMM and captured into a static CUDA Graph, delivering **505.4 to 1,835.8 tok/s** (a **3.45× acceleration** over eager generation in a single GPU pulse with zero CPU latency).
+* **8 Dyadic Memory Bands ($K=8$)**: The recurrent state is decomposed into 8 dyadic temporal bands ($2^0, 2^1, \dots, 2^7$, strides 1 to 128) with structured time constants $\tau \in [4, 16, 64, 256, 1024, 4096, 16384, 500000]$.
+* **Needle Retention at 120,000 Tokens**: In the Needle-In-A-Haystack benchmark across 120,000 tokens, flat 1D recurrence undergoes total amnesia ($0.000000$) by token 512, whereas Band 7 (Permanent Neocortical Anchor) retains **78.66% to 99.8% of the target signal** with strictly constant **2.25 MB memory** ($491.5\times$ smaller than Transformer KV-cache of 1.11 GB).
+* **GABAergic Lateral Self-Inhibition ($\gamma=0.35$)**: Suppresses repetitive echo attractors ($q_t \cdot k_{t-1}$), cutting repetition collapse from **17.27%** in the Transformer down to **1.43% – 3.37%**.
+* **Recurrent-Native 100M Pretraining Run**: Combining Truncated BPTT (TBPTT) state streaming and Multi-Token Prediction (MTP) achieved **1.7109 pretraining loss (PPL 5.53)** on 100M FineWeb-Edu tokens ($4.7\times$ lower loss than previous 620M Chinchilla baseline).
+* **CUDA Graph Pulse Engine**: Linear projections are fused into a single $W_{\text{in}}$ GEMM and captured into a static CUDA Graph, delivering **505.4 to 1,835.8 tok/s** (a **3.45x acceleration** over eager generation in a single GPU pulse with zero CPU latency).
 * **Benchmark Details**: Full pretraining, SFT curves, memory scaling, and structured sequential prompt evaluations are preserved in [`tokenized/BENCHMARK_RESULTS.md`](tokenized/BENCHMARK_RESULTS.md).
 
 ```bash
-# Run comprehensive inference benchmark (Speed, VRAM, and Scaling)
-python tokenized/benchmark_inference_full.py
+# Run 120,000-token Needle-In-A-Haystack (NIAH) benchmark
+python tokenized/test_needle_survival.py
 
-# Test structured sequence completion (Counting, Patterns, Retrieval)
-python tokenized/test_sequence_prompts.py
+# Run comprehensive 4-model side-by-side inference evaluation
+python tokenized/eval_detailed_inference.py
 
-# Run interactive side-by-side conversational arena
+# Run interactive conversational arena
 python tokenized/chat_arena.py
 ```
 

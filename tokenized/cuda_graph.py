@@ -58,8 +58,11 @@ class CUDAGraphedHGDM:
                     logits, next_s = self.model(self.static_token, states=self.static_states)
                     for i in range(len(self.model.layers)):
                         self.static_states[i][0].copy_(next_s[i][0])
-                        if self.static_states[i][1] is not None:
+                        if self.static_states[i][1] is not None and next_s[i][1] is not None:
                             self.static_states[i][1].copy_(next_s[i][1])
+                        if len(self.static_states[i]) > 2 and len(next_s[i]) > 2:
+                            if self.static_states[i][2] is not None and next_s[i][2] is not None:
+                                self.static_states[i][2].copy_(next_s[i][2])
                     self.static_logits.copy_(logits)
         torch.cuda.current_stream().wait_stream(s)
         
@@ -69,8 +72,11 @@ class CUDAGraphedHGDM:
                 logits, next_s = self.model(self.static_token, states=self.static_states)
                 for i in range(len(self.model.layers)):
                     self.static_states[i][0].copy_(next_s[i][0])
-                    if self.static_states[i][1] is not None:
+                    if self.static_states[i][1] is not None and next_s[i][1] is not None:
                         self.static_states[i][1].copy_(next_s[i][1])
+                    if len(self.static_states[i]) > 2 and len(next_s[i]) > 2:
+                        if self.static_states[i][2] is not None and next_s[i][2] is not None:
+                            self.static_states[i][2].copy_(next_s[i][2])
                 self.static_logits.copy_(logits)
             
         print("[CUDA Graph] Graph captured successfully!")
@@ -85,6 +91,7 @@ class CUDAGraphedHGDM:
     ) -> torch.Tensor:
         self.model.eval()
         B, T_prompt = prompt_ids.shape
+        assert B == 1, f"CUDAGraphedHGDM currently supports batch_size=1, got {B}"
         
         # 1. Prime recurrent state with prompt
         with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -93,8 +100,11 @@ class CUDAGraphedHGDM:
         # 2. Copy prime states into static graph state buffers
         for i in range(len(self.model.layers)):
             self.static_states[i][0].copy_(prime_states[i][0])
-            if self.static_states[i][1] is not None:
+            if self.static_states[i][1] is not None and prime_states[i][1] is not None:
                 self.static_states[i][1].copy_(prime_states[i][1])
+            if len(self.static_states[i]) > 2 and len(prime_states[i]) > 2:
+                if self.static_states[i][2] is not None and prime_states[i][2] is not None:
+                    self.static_states[i][2].copy_(prime_states[i][2])
                 
         if temperature > 0:
             logits_step = logits[:, -1] / max(1e-5, temperature)
