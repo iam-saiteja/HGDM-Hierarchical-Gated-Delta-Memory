@@ -361,7 +361,7 @@ class HierarchicalBandMemory(nn.Module):
             log_alpha = torch.log(alpha_k.clamp(min=1e-7)).permute(0, 2, 1) # [B, H, T]
             cumsum_log = torch.cumsum(log_alpha, dim=-1) # [B, H, T]
             diff = cumsum_log.unsqueeze(-1) - cumsum_log.unsqueeze(-2) # [B, H, T, T]
-            diff = torch.where(causal_mask, diff, torch.full_like(diff, float('-inf')))
+            diff = diff.masked_fill(~causal_mask, float('-inf'))
             decay_matrix = torch.exp(diff) * beta_k.permute(0, 2, 1).unsqueeze(-2) # [B, H, T, T]
             
             # Recurrent associative output via parallel scan
@@ -372,7 +372,7 @@ class HierarchicalBandMemory(nn.Module):
             decay_from_start = torch.exp(cumsum_log) # [B, H, T]
             if S_init is not None:
                 S_0 = S_init[:, k_idx].to(dtype=q.dtype) # [B, H, d_k, d_v]
-                s0_q = torch.einsum('bhkd,bhtk->bhtd', S_0, q_p)
+                s0_q = torch.matmul(q_p, S_0) # [B, H, T, d_v]
                 out_k_carry = (decay_from_start.unsqueeze(-1) * s0_q).permute(0, 2, 1, 3)
                 out_k = out_k + out_k_carry
             
@@ -397,8 +397,9 @@ class HierarchicalBandMemory(nn.Module):
             band_readouts.append(out_k)
             
             # Final state for recurrent continuation
-            decay_to_end = torch.exp(cumsum_log[:, :, -1:] - cumsum_log) * beta_k.permute(0, 2, 1)
-            S_k_final = torch.einsum('bht,bhtk,bhtd->bhkd', decay_to_end, k_p, v_p)
+            decay_to_end = torch.exp(cumsum_log[:, :, -1:] - cumsum_log) * beta_k.permute(0, 2, 1) # [B, H, T]
+            k_decayed = k_p * decay_to_end.unsqueeze(-1) # [B, H, T, d_k]
+            S_k_final = torch.matmul(k_decayed.transpose(-1, -2), v_p) # [B, H, d_k, d_v]
             if S_init is not None:
                 decay_total = torch.exp(cumsum_log[:, :, -1:, None]) # [B, H, 1, 1]
                 S_k_final = S_k_final + decay_total * S_init[:, k_idx].to(dtype=q.dtype)

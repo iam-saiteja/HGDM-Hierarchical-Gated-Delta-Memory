@@ -340,6 +340,7 @@ def main():
         save_every=args.save_every,
         eval_every=args.eval_every,
     )
+    os._exit(0)
 
 
 if __name__ == "__main__":
