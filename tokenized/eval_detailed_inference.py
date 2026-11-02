@@ -24,6 +24,15 @@ def run_detailed_eval():
     m_new.load_state_dict(d_new["model_state"], strict=False)
     m_new.eval()
 
+    # 1b. Load New Recurrent-Native HGDM after SFT (if available)
+    ckpt_sft_path = "checkpoints_tokenized/recurrent_native/ckpt_hgdm_sft.pt"
+    m_sft = None
+    if os.path.exists(ckpt_sft_path):
+        d_sft = torch.load(ckpt_sft_path, map_location=device, weights_only=False)
+        m_sft = TokenizedHGDM(d_sft["config"]).to(device)
+        m_sft.load_state_dict(d_sft["model_state"], strict=False)
+        m_sft.eval()
+
     # 2. Load Old HGDM (620M Pretrain + 500-step SFT, 4 Bands, Stateless)
     ckpt_old_path = "checkpoints_tokenized/full_hbs/ckpt_hgdm_sft.pt"
     if not os.path.exists(ckpt_old_path):
@@ -98,9 +107,25 @@ def run_detailed_eval():
         speed_tf = toks_tf / max(1e-4, dt_tf)
         text_tf = tok.decode(out_tf[0, p_ids.shape[1]:], skip_special_tokens=True).strip()
 
-        print(f"\n[1. NEW Recurrent-Native HGDM (Pure Pretrained - 100M)]")
+        print(f"\n[1. NEW Recurrent-Native HGDM (Base Pretrained - 100M)]")
         print(f"Speed: {speed_new:.1f} tok/s ({dt_new*1000/toks_new:.2f} ms/tok) | KV-Cache: 0 KB (Recurrent State: 2.25 MB constant)")
         print(f"Generated:\n{text_new}")
+
+        if m_sft is not None:
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            with torch.no_grad():
+                with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                    out_sft = m_sft.generate(p_ids, max_new_tokens=45, temperature=0.7, top_k=40, repetition_penalty=1.15)
+            torch.cuda.synchronize()
+            t1 = time.perf_counter()
+            dt_sft = t1 - t0
+            toks_sft = out_sft.shape[1] - p_ids.shape[1]
+            speed_sft = toks_sft / max(1e-4, dt_sft)
+            text_sft = tok.decode(out_sft[0, p_ids.shape[1]:], skip_special_tokens=True).strip()
+            print(f"\n[1b. NEW Recurrent-Native HGDM (After Conversational SFT)]")
+            print(f"Speed: {speed_sft:.1f} tok/s ({dt_sft*1000/toks_sft:.2f} ms/tok) | KV-Cache: 0 KB (Recurrent State: 2.25 MB constant)")
+            print(f"Generated:\n{text_sft}")
 
         print(f"\n[2. OLD HGDM-HBS (620M Pretrain + 500 SFT)]")
         print(f"Speed: {speed_old:.1f} tok/s ({dt_old*1000/toks_old:.2f} ms/tok) | KV-Cache: 0 KB (Recurrent State: 1.15 MB constant)")

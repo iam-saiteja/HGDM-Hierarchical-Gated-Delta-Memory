@@ -184,7 +184,7 @@ def train_sft(
     else:
         model = MatchedTransformer(config).to(device)
 
-    model.load_state_dict(data["model_state"])
+    model.load_state_dict(data["model_state"], strict=False)
     print(f"Loaded {model_type.upper()} successfully ({sum(p.numel() for p in model.parameters()):,} parameters).")
 
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
