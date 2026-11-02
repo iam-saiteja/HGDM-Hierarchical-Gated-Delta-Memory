@@ -19,7 +19,13 @@ def main():
         return
         
     device = torch.device("cuda")
-    ckpt_path = "checkpoints_tokenized/ckpt_hgdm_sft.pt"
+    if len(sys.argv) > 1:
+        ckpt_path = sys.argv[1]
+    elif os.path.exists("checkpoints_tokenized/full_hbs/ckpt_hgdm_sft.pt"):
+        ckpt_path = "checkpoints_tokenized/full_hbs/ckpt_hgdm_sft.pt"
+    else:
+        ckpt_path = "checkpoints_tokenized/ckpt_hgdm_sft.pt"
+    print(f"Loading checkpoint: {ckpt_path}")
     data = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg = data["config"]
     model = TokenizedHGDM(cfg).to(device)
