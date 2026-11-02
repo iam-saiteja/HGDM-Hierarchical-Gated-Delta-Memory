@@ -57,31 +57,31 @@ def main():
         # Transformer sampling (temp=0.7)
         with torch.no_grad():
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                out_t_sample = mt.generate(ids, max_new_tokens=30, temperature=0.7)
+                out_t_sample = mt.generate(ids, max_new_tokens=50, temperature=0.7)
                 resp_t_sample = tok.decode(out_t_sample[0, ids.shape[1]:], skip_special_tokens=True).strip()
 
         # Transformer greedy (temp=0.1)
         with torch.no_grad():
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                out_t_greedy = mt.generate(ids, max_new_tokens=30, temperature=0.1)
+                out_t_greedy = mt.generate(ids, max_new_tokens=50, temperature=0.1)
                 resp_t_greedy = tok.decode(out_t_greedy[0, ids.shape[1]:], skip_special_tokens=True).strip()
 
         # HGDM sampling (temp=0.7)
         with torch.no_grad():
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                out_h_sample = mh.generate(ids, max_new_tokens=30, temperature=0.7)
+                out_h_sample = mh.generate(ids, max_new_tokens=50, temperature=0.7)
                 resp_h_sample = tok.decode(out_h_sample[0, ids.shape[1]:], skip_special_tokens=True).strip()
 
-        # HGDM low-temp (temp=0.1)
+        # HGDM greedy (temp=0.1)
         with torch.no_grad():
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                out_h_greedy = mh.generate(ids, max_new_tokens=30, temperature=0.1)
+                out_h_greedy = mh.generate(ids, max_new_tokens=50, temperature=0.1)
                 resp_h_greedy = tok.decode(out_h_greedy[0, ids.shape[1]:], skip_special_tokens=True).strip()
 
-        print(f"[Transformer  - Sampling T=0.7]: {resp_t_sample}")
-        print(f"[Transformer  - Greedy   T=0.1]: {resp_t_greedy}")
-        print(f"[HGDM-HBS     - Sampling T=0.7]: {resp_h_sample}")
-        print(f"[HGDM-HBS     - Greedy   T=0.1]: {resp_h_greedy}")
+        print(f"[Transformer  - Sampling T=0.7]:\n{resp_t_sample}\n")
+        print(f"[Transformer  - Greedy   T=0.1]:\n{resp_t_greedy}\n")
+        print(f"[HGDM-HBS     - Sampling T=0.7]:\n{resp_h_sample}\n")
+        print(f"[HGDM-HBS     - Greedy   T=0.1]:\n{resp_h_greedy}\n")
 
 
 if __name__ == "__main__":
