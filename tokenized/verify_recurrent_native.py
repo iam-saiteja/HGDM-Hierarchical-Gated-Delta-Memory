@@ -64,6 +64,11 @@ def test_model_generation(model, tokenizer, device, prompts, name="Model", max_t
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ckpt", type=str, default=None)
+    args = parser.parse_args()
+
     if not torch.cuda.is_available():
         print("CUDA required for verification.")
         return
@@ -82,8 +87,14 @@ def main():
         "The quick brown fox",
     ]
 
-    rec_native_path = "checkpoints_tokenized/recurrent_native/ckpt_hgdm.pt"
+    rec_native_path = args.ckpt or (
+        "checkpoints_tokenized/recurrent_native/ckpt_hgdm.pt"
+        if os.path.exists("checkpoints_tokenized/recurrent_native/ckpt_hgdm.pt")
+        else "checkpoints_tokenized/test_smoke/ckpt_hgdm.pt"
+    )
     old_hgdm_path = "checkpoints_tokenized/full_hbs/ckpt_hgdm_sft.pt"
+    if not os.path.exists(old_hgdm_path):
+        old_hgdm_path = "checkpoints_tokenized/ckpt_hgdm_sft.pt"
     transformer_path = "checkpoints_tokenized/ckpt_transformer_sft.pt"
 
     results = {}
